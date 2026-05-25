@@ -101,6 +101,51 @@ def test_nationwide_skips_validation():
 
 # -------------------- 兜底兜底: client-side title filter --------------------
 
+def test_unified_search_returns_both_sources():
+    """unified search_judicial 广州市级 → 两端都有数据, 价格降序合并, 单位归一."""
+    r = server.search_judicial(province="广东", city="广州市", limit=15)
+    assert "ali" in r["sources"] and "jd" in r["sources"], \
+        f"应同时拿到两端, got sources={r['sources']}, errors={r.get('errors')}"
+    assert r["count"] > 0
+    # 每条 item 应有归一化字段
+    for it in r["items"]:
+        assert it["platform"] in ("ali", "jd")
+        assert "id" in it
+        assert "title" in it
+        assert "price_yuan" in it
+        assert "raw" in it
+    # 价格降序
+    prices = [it["price_yuan"] for it in r["items"] if it["price_yuan"] is not None]
+    assert all(prices[i] >= prices[i + 1] for i in range(len(prices) - 1)), \
+        f"应价格降序, got {prices[:5]}"
+    # 两端都有贡献
+    platforms = {it["platform"] for it in r["items"]}
+    assert platforms == {"ali", "jd"}, f"top {len(r['items'])} 内应两端都出现, got {platforms}"
+
+
+def test_unified_search_normalizes_price_unit():
+    """阿里 currentPrice 单位是分, 京东是元; 归一化后 price_yuan 应统一为元 (float)."""
+    r = server.search_judicial(province="广东", city="广州市", limit=20)
+    for it in r["items"]:
+        raw_cp = it["raw"].get("currentPrice")
+        if raw_cp is None:
+            continue
+        if it["platform"] == "ali":
+            assert abs(it["price_yuan"] - raw_cp / 100.0) < 0.01, \
+                f"阿里应 ÷100 归一, raw={raw_cp}, got price_yuan={it['price_yuan']}"
+        else:  # jd
+            assert abs(it["price_yuan"] - float(raw_cp)) < 0.01, \
+                f"京东原价就是元, got price_yuan={it['price_yuan']} raw={raw_cp}"
+
+
+def test_unified_search_district_both_sources():
+    """unified district 用例: 苏州吴江区 — 两端都应有结果."""
+    r = server.search_judicial(province="江苏", city="苏州市", district="吴江区", limit=15)
+    assert "ali" in r["sources"]
+    assert "jd" in r["sources"]
+    assert r["count"] > 0
+
+
 def test_district_unknown_to_legacy_and_unlearnable_falls_back_to_title_filter():
     """边界: 一个 legacy 数据集没有、city pages 也没出现的虚构区县名 → 走客户端 title 过滤
     (返回空 items 但不报错)."""

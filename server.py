@@ -9,7 +9,7 @@ v2 设计原则:
 - 阿里 location 编码直接用国标 GB 2260 (前 2 省 + 中 2 市 + 末 2 区, server 自动展开 prefix).
 """
 from __future__ import annotations
-import json, logging, os, sys, time
+import concurrent.futures as cf, json, logging, os, sys, time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,16 +31,25 @@ from jd_h5_client import JDH5Client, JD_AREAS
 mcp = FastMCP(
     name="auction-mcp",
     instructions=(
-        "司法拍卖实时查询 MCP — 阿里拍卖 + 京东拍卖 双端.\n"
-        "两端默认都是 价格降序 + 仅进行中/即将开始.\n"
+        "司法拍卖实时查询 MCP — 同时聚合 阿里拍卖 + 京东拍卖 两端.\n"
+        "\n"
+        "🔑 **默认调用 `search_judicial`** (双端聚合, 一次查询返回两端合并 + 价格降序 + 单位归一).\n"
+        "   除非用户明确说 '只查阿里' / '只查京东', 否则**永远用 search_judicial**, 不要单独调\n"
+        "   ali_search_judicial / jd_search_judicial — 那俩是 advanced 单源工具, 默认调会让用户只看到\n"
+        "   一半数据 (阿里和京东是两个独立标的池, 不重复, 各有自己的优势品类).\n"
         "\n"
         "调用约定:\n"
-        "1. 地区参数都用**中文**, 不要自己拼国标编码.\n"
-        "2. 用户说 '查 X 市拍卖' → 你自己推断 province + city. 用户要区县 → 加 district 参数.\n"
-        "3. 阿里支持 31 省 / 3146 区县, 京东支持 33 省 / 5344 区县. 区县直接传 district 中文名,\n"
+        "1. 地区参数都用**中文**, 不要自己拼国标编码 (除非用户明确给出).\n"
+        "2. 用户说 '查广州拍卖' → province='广东', city='广州市'.\n"
+        "   用户说 '杭州房产' → province='浙江', city='杭州市'.\n"
+        "   用户说 '查苏州吴江区' → province='江苏', city='苏州市', district='吴江区'.\n"
+        "   用户只说省 (如 '查广东') → 只传 province='广东', city 留空.\n"
+        "3. 阿里支持 31 省 / 3146 区县, 京东支持 33 省 / 5344 区县, 区县直接传 district 中文名,\n"
         "   工具自动解析两端各自的内部编码. ⚠️ 不要自己从 *_get_supported_areas 拿 code 再传\n"
         "   location_codes — 那是 2020 版仅供人类参考, 阿里 server 用 pre-2013 vintage, 错位会乱掺.\n"
-        "4. 排序 / 状态固定, 不暴露参数.\n"
+        "4. 用户问 '排序 / 状态' 怎么改: 告诉他不能改 (固定='价格降序'+'仅进行中/即将开始').\n"
+        "5. search_judicial 返回每条 item 带 `platform: 'ali'|'jd'` + 归一化 `price_yuan` (元),\n"
+        "   方便上层做对比. 单源原生字段也保留 (itemId / paimaiId 等).\n"
     ),
 )
 
@@ -86,6 +95,97 @@ def _extract_items(raw: dict) -> tuple[list[dict], dict]:
     return items, meta
 
 
+def _normalize_item(platform: str, item: dict) -> dict:
+    """Item 归一化: 价格统一为元(float), 加 platform 字段, 保留原始 item 于 raw.
+
+    阿里 currentPrice 单位是**分** (1.25亿 = 125000000000), 京东是**元** (2627513600.0).
+    归一化后上层和 LLM agent 不用心智负担去记单位.
+    """
+    cp = item.get("currentPrice")
+    if platform == "ali":
+        price_yuan = (cp / 100.0) if isinstance(cp, (int, float)) else None
+        item_id = item.get("itemId")
+    else:  # jd
+        price_yuan = float(cp) if isinstance(cp, (int, float)) else None
+        item_id = item.get("paimaiId")
+    return {
+        "platform":   platform,
+        "id":         item_id,
+        "title":      item.get("title"),
+        "price_yuan": price_yuan,
+        "raw":        item,
+    }
+
+
+@mcp.tool()
+def search_judicial(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> dict:
+    """**统一搜索 (推荐默认调用此工具)** — 同时查 阿里 + 京东 司法拍卖, 并行打两端,
+    价格降序合并, 单位归一到元.
+
+    阿里和京东是两个**独立的标的池, 不重复**: 阿里偏机构端高价资产 (亿级土地/在建工程),
+    京东偏散户端住宅/股权/小额债权. 单调一端会让用户只看到一半数据.
+
+    Args:
+        province / city / district: 地区中文名 (e.g. "广东" / "广州市" / "天河区"). 同单源工具.
+        page: 页码 (两端各取 page=N. ali 10 条/页, jd 40 条/页, 合并池 ~50 条/页).
+        limit: 合并后返回前 N 条 (默认 20, 上限建议 50).
+
+    Returns:
+        {
+          count: int,                      # 实际返回 items 数 (≤ limit)
+          items: [{platform, id, title, price_yuan, raw}, ...],   # 价格降序
+          ali_totalCount: int | None,      # 阿里端总数 (可分页)
+          jd_count: int | None,            # 京东端本页 count
+          sources: ["ali", "jd"],          # 成功调用的源 (若某端 error 此处不列)
+          errors?: {ali?: {...}, jd?: {...}},    # 任一端失败的诊断信息
+        }
+    """
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        f_ali = ex.submit(ali_search_judicial, province, city, district, page)
+        f_jd  = ex.submit(jd_search_judicial,  province, city, district, page)
+        try: ali_r = f_ali.result()
+        except Exception as e: ali_r = {"error": "ali_unexpected_exception", "exception": str(e)}
+        try: jd_r = f_jd.result()
+        except Exception as e: jd_r = {"error": "jd_unexpected_exception", "exception": str(e)}
+
+    items, errors, sources = [], {}, []
+    if ali_r.get("error"):
+        errors["ali"] = {k: v for k, v in ali_r.items() if k != "items"}
+    else:
+        sources.append("ali")
+        for it in (ali_r.get("items") or []):
+            items.append(_normalize_item("ali", it))
+    if jd_r.get("error"):
+        errors["jd"] = {k: v for k, v in jd_r.items() if k != "items"}
+    else:
+        sources.append("jd")
+        for it in (jd_r.get("items") or []):
+            items.append(_normalize_item("jd", it))
+
+    # 价格降序 (None 价格沉到末尾)
+    items.sort(key=lambda x: x["price_yuan"] if x["price_yuan"] is not None else -float("inf"),
+               reverse=True)
+    items = items[:limit]
+
+    out: dict[str, Any] = {
+        "count": len(items),
+        "page":  page,
+        "ali_totalCount": ali_r.get("totalCount"),
+        "jd_count": jd_r.get("count"),
+        "sources": sources,
+        "items": items,
+    }
+    if errors:
+        out["errors"] = errors
+    return out
+
+
 @mcp.tool()
 def ali_search_judicial(
     province: str | None = None,
@@ -95,7 +195,11 @@ def ali_search_judicial(
     location_codes: list[str] | None = None,
     fcat_v4_ids: list[str] | None = None,
 ) -> dict:
-    """阿里司法拍卖搜索. **固定 价格降序 + 仅进行中/即将开始** (不可改).
+    """**[Advanced 单源]** 阿里司法拍卖搜索. 默认情况下用 `search_judicial` 同时拿两端, 别单独调这个.
+
+    仅当用户**明确**要"只查阿里" / 想用 location_codes / fcat_v4_ids 等高级参数时才用.
+
+    **固定 价格降序 + 仅进行中/即将开始** (不可改).
 
     地区用**中文**传, 工具内部自动解析阿里 server 实际接受的编码 (pre-2013 vintage).
 
@@ -296,8 +400,12 @@ def jd_search_judicial(
     district: str | None = None,
     page: int = 1,
 ) -> dict:
-    """京东司法拍卖搜索. **固定 价格降序 + 仅进行中/即将开始** (不可改).
-    走 api.m.jd.com/api functionId=getSearchData (公开 endpoint, **无需登录态**).
+    """**[Advanced 单源]** 京东司法拍卖搜索. 默认情况下用 `search_judicial` 同时拿两端, 别单独调这个.
+
+    仅当用户**明确**要"只查京东"时才用.
+
+    **固定 价格降序 + 仅进行中/即将开始** (不可改). 走 api.m.jd.com/api functionId=getSearchData
+    (公开 endpoint, **无需登录态**).
 
     支持范围: 全国 33 省 / 455 市 / 5344 区县 (内置 jd_areas.json, 由 getAreaInfoMap 拉取生成).
 
