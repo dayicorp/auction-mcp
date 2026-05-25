@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+package-lock.json
+yarn.lock
+
+# Substrate tweak 编译产物 (运行 `make` 重新生成)
+tweak/*.dylib
+tweak/*.o
+
+# Android 逆向 scratch (APK / Frida 脚本 / 离线产物), 跟 MCP runtime 无关
+android/
+
+# IDA databases (大文件)
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# 敏感 (避免误传)
+*.env
+.env.*
+*credentials*
+*.pem
+*.key
+cookies.json
+*.har
+mitm_flows*.mitm
+ali_flows*.mitm
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 测试 / 临时
+/tmp/
+*_test_output.*

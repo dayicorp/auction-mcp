@@ -1,0 +1,407 @@
+"""MCP server for 京东 + 阿里 司法拍卖 (实时, 无需 iPad sign bridge).
+
+v2 设计原则:
+- **零依赖外部设备/桥**. 完全本地 Python httpx + MCP stdio.
+- 阿里端走 H5 mtop 网关 (`h5api.m.taobao.com`), sign 是公开 MD5 算法, 不需要 app 端 anti-tamper SDK.
+  实现见 ali_h5_client.py. 这个路径跟 app 拿同一个 endpoint (`mtop.taobao.datafront.invoke.auctionwalle`)
+  和同一组数据.
+- 京东端走公开 `api.m.jd.com/api` (paimai_unifiedSearch 等 functionId 不需要 sign).
+- 阿里 location 编码直接用国标 GB 2260 (前 2 省 + 中 2 市 + 末 2 区, server 自动展开 prefix).
+"""
+from __future__ import annotations
+import json, logging, os, sys, time
+from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Silence httpx + httpcore INFO logs (would pollute MCP stdio if accidentally to stdout)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+from mcp.server.fastmcp import FastMCP
+
+from ali_h5_client import (
+    AliH5Client, resolve_area, resolve_area_ali,
+    validate_location_scoped, GB2260,
+)
+from jd_h5_client import JDH5Client, JD_AREAS
+
+# ============================================================ init
+
+mcp = FastMCP(
+    name="auction-mcp",
+    instructions=(
+        "司法拍卖实时查询 MCP — 阿里拍卖 + 京东拍卖 双端.\n"
+        "两端默认都是 价格降序 + 仅进行中/即将开始.\n"
+        "\n"
+        "调用约定:\n"
+        "1. 地区参数都用**中文**, 不要自己拼国标编码.\n"
+        "2. 用户说 '查 X 市拍卖' → 你自己推断 province + city. 用户要区县 → 加 district 参数.\n"
+        "3. 阿里支持 31 省 / 3146 区县, 京东支持 33 省 / 5344 区县. 区县直接传 district 中文名,\n"
+        "   工具自动解析两端各自的内部编码. ⚠️ 不要自己从 *_get_supported_areas 拿 code 再传\n"
+        "   location_codes — 那是 2020 版仅供人类参考, 阿里 server 用 pre-2013 vintage, 错位会乱掺.\n"
+        "4. 排序 / 状态固定, 不暴露参数.\n"
+    ),
+)
+
+# 阿里 H5 client (lazy init, 第一次调用时获取 _m_h5_tk cookie)
+ali = AliH5Client()
+
+# 京东 m. 版 client (无 sign, 无登录态)
+jd = JDH5Client()
+
+# ============================================================ tools: 阿里司法拍卖 (H5 mtop)
+
+def _extract_items(raw: dict) -> tuple[list[dict], dict]:
+    """从 ali.search_judicial 原始响应抽 items + meta. 返回 (items, {totalCount, page, pageSize})."""
+    scenes = (raw.get("data") or {}).get("data", {}).get("scenes") or []
+    if not scenes:
+        return [], {"totalCount": 0, "page": None, "pageSize": 10}
+    sl = (scenes[0].get("schemeList") or [{}])[0]
+    cl = sl.get("contentList") or []
+    items = []
+    for it in cl:
+        em = it.get("extraMap", {}) or {}
+        items.append({
+            "itemId":      it.get("itemId") or em.get("itemId"),
+            "title":       em.get("title") or it.get("title"),
+            "currentPrice": it.get("currentPrice"),
+            "displayInitialPrice": em.get("displayInitialPrice"),
+            "displayInitialPriceUnit": em.get("displayInitialPriceUnit"),
+            "locationCode": em.get("locationCode") or it.get("locationCode"),
+            "shopName":    em.get("shopName") or it.get("shopName"),
+            "fcatV4Ids":   em.get("fcatV4Ids"),
+            "fcatV4ButtomName": em.get("fcatV4ButtomName"),
+            "startTime":   em.get("startTime") or it.get("startTime"),
+            "endTime":     em.get("endTime") or it.get("endTime"),
+            "status":      em.get("status") or it.get("status"),
+            "statusOrder": it.get("statusOrder"),
+            "circ":        em.get("circ") or it.get("circ"),
+            "bizType":     em.get("bizType") or it.get("bizType"),
+            "headerPicUrls": em.get("headerPicUrls"),
+            "subscribeCnt": em.get("subscribeCnt") or it.get("subscribeCnt"),
+        })
+    meta = {"totalCount": sl.get("totalCount"), "page": sl.get("page"),
+            "pageSize": sl.get("pageSize") or 10}
+    return items, meta
+
+
+@mcp.tool()
+def ali_search_judicial(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+    page: int = 1,
+    location_codes: list[str] | None = None,
+    fcat_v4_ids: list[str] | None = None,
+) -> dict:
+    """阿里司法拍卖搜索. **固定 价格降序 + 仅进行中/即将开始** (不可改).
+
+    地区用**中文**传, 工具内部自动解析阿里 server 实际接受的编码 (pre-2013 vintage).
+
+    典型用法:
+      - "查广州拍卖"     → province="广东", city="广州市"
+      - "杭州房产"      → province="浙江", city="杭州市"
+      - "查广东"        → province="广东" (整省, city 留空)
+      - **"绍兴柯桥区"** → province="浙江", city="绍兴市", district="柯桥区"
+        (内置 pre-2013 数据 + 动态学码, 自动解析为阿里真正接受的编码 330621; 不要自己拼 location_codes)
+      - 用户没说地区     → 不传 (全国)
+
+    Args:
+        province: 省份中文 (e.g. "广东"). 不传 = 全国
+        city:     城市中文 (e.g. "广州市"). 必须配合 province
+        district: 区县中文 (e.g. "柯桥区"). 必须配合 province + city
+        page:     页码 (10 条/页)
+        location_codes: (高级, escape hatch) 直接传编码列表; 仍会跑垃圾结果守门
+        fcat_v4_ids:    (高级) 分类编码列表, 见 ali_get_filter_options
+
+    Returns:
+        正常: {count, page, totalCount, items, validated, [matched_district_code], [_district_fallback]}
+        阿里返垃圾(乱掺其他省市): {error: "ali_returned_unscoped_results", diagnostics, items: []}
+    """
+    # ---------- 解析 location_codes ----------
+    fallback_used = None       # 客户端 title 过滤兜底标志
+    matched_district = None    # 最终命中的区县码 (若 district 路径)
+    expected_prefix = None     # 用于守门校验
+
+    if location_codes:
+        # 显式编码: 透传; 守门仅按 4 位前缀校验 (escape hatch)
+        first = next((c for c in location_codes if c), None)
+        if first and len(str(first)) >= 4:
+            expected_prefix = str(first)[:4]
+    elif district:
+        if not city:
+            return {"error": "district_requires_city",
+                    "message": "传 district 必须同时传 city"}
+        # 主: legacy 数据集解析
+        ali_code = resolve_area_ali(province, city, district)
+        city_code = resolve_area_ali(province, city) or ""
+        expected_prefix = city_code[:4] if city_code else None
+
+        is_district_hit = ali_code and ali_code != city_code and not ali_code.endswith("00")
+        if is_district_hit:
+            location_codes = [ali_code]
+            matched_district = ali_code
+        else:
+            # 兜底: 从城市级结果学码 (e.g. 柯桥区在 legacy 叫绍兴县, 名字对不上)
+            learned = ali.learn_district_code_from_city(city_code, district)
+            if learned:
+                location_codes = [learned]
+                matched_district = learned
+            else:
+                # 兜底中的兜底: 城市级查 + 客户端按 district 名 title 过滤
+                location_codes = [city_code]
+                fallback_used = "title_filter"
+    elif province or city:
+        code = resolve_area_ali(province, city)
+        if code:
+            location_codes = [code]
+            expected_prefix = code[:4]
+
+    # ---------- 查询 ----------
+    r = ali.search_judicial(
+        page=page,
+        sort="501",
+        status_orders=["0", "1"],
+        location_codes=location_codes,
+        fcat_v4_ids=fcat_v4_ids,
+    )
+    ret_first = (r.get("ret") or [""])[0] if isinstance(r.get("ret"), list) else str(r.get("ret") or "")
+    if ret_first != "SUCCESS::调用成功":
+        # 非业务成功 (含 LOCAL_NON_JSON / token 错误等)
+        return {"error": "mtop_call_failed", "ret": r.get("ret"),
+                "diagnostics": {k: v for k, v in r.items() if k.startswith("_")}}
+
+    items, meta = _extract_items(r)
+
+    # ---------- 客户端 title 过滤兜底 ----------
+    if fallback_used == "title_filter" and district:
+        dn = district.rstrip("区县市旗")
+        items = [it for it in items if dn and dn in (it.get("title") or "")]
+        meta["totalCount"] = None  # 客户端过滤后不知道真 totalCount
+
+    # ---------- 垃圾结果守门 ----------
+    validated = True
+    if expected_prefix and items:
+        v = validate_location_scoped(items, expected_prefix)
+        if not v["ok"]:
+            return {
+                "error": "ali_returned_unscoped_results",
+                "diagnostics": {
+                    "totalCount": meta.get("totalCount"),
+                    "expected_prefix": expected_prefix,
+                    "sample_off_prefix_codes": v["sample_off_prefix"],
+                    "matched_in_scope": v["matched"],
+                    "total_in_response": v["total"],
+                    "location_codes_sent": location_codes,
+                },
+                "items": [],
+            }
+
+    out = {
+        "totalCount": meta.get("totalCount"),
+        "page":       meta.get("page") or page,
+        "pageSize":   meta.get("pageSize") or 10,
+        "count":      len(items),
+        "items":      items,
+        "validated":  validated,
+    }
+    if matched_district: out["matched_district_code"] = matched_district
+    if fallback_used:    out["_district_fallback"] = fallback_used
+    if r.get("_token_refreshed"): out["_token_refreshed"] = True
+    return out
+
+
+@mcp.tool()
+def ali_get_filter_options() -> dict:
+    """阿里司法拍卖完整 filter 维度可选项 (9 个维度).
+
+    返回 sort / fcatV4Ids (分类) / provs / citys / locationCodes / circs (轮次) /
+         statusOrders (状态) / tagIds (特性) / zcBizTypes (资产类型) 的所有可选 (value, name).
+    走 H5 mtop pageSpmcs=filtersf-nav, 实时.
+
+    Returns:
+        {dimensions: [{varName, options: [{value, name}]}]}
+    """
+    r = ali.get_filter_nav()
+    if r.get("ret", [""])[0] != "SUCCESS::调用成功":
+        return {"ret": r.get("ret"), "error": "filtersf-nav call failed"}
+
+    cl = (((r.get("data") or {}).get("data") or {}).get("scenes") or [{}])[0]\
+         .get("schemeList", [{}])[0].get("contentList", [])
+    dims = []
+    for item in cl:
+        opts = []
+        for opt in (item.get("data") or []):
+            if isinstance(opt, dict):
+                opts.append({"value": opt.get("value"), "name": opt.get("name")})
+        dims.append({
+            "varName": item.get("varName"),
+            "show":    item.get("show"),
+            "optionDisplayMode": item.get("optionDisplayMode"),
+            "count":   len(opts),
+            "options": opts,
+        })
+    return {"dimensions": dims, "count": len(dims)}
+
+
+@mcp.tool()
+def ali_get_supported_areas(province: str | None = None,
+                            city: str | None = None) -> dict:
+    """查 GB 2260 行政区划. 不传 = 31 省列表 + 资源链接; 传 province = 该省所有市;
+    传 province+city = 该市所有区县.
+
+    数据集: modood/Administrative-divisions-of-China (2020 版, 31 省 / 342 市 / 3056 区县).
+    """
+    if not province:
+        return {
+            "total": {"provinces": len(GB2260),
+                       "cities": sum(len(p.get("children",[])) for p in GB2260),
+                       "districts": sum(len(c.get("children",[]))
+                                          for p in GB2260 for c in p.get("children",[]))},
+            "provinces": [{"name": p["name"], "code": (p["code"]+"0000")[:6]} for p in GB2260],
+            "note": "传 province 查市, 再传 city 查区县. ⚠️ 此处编码是 2020 版仅供参考; "
+                    "真正查询请用 ali_search_judicial(province, city, district=中文名), "
+                    "工具内置 pre-2013 编码自动解析阿里 server 真值, 不要把这里的 code 传给 search.",
+        }
+    pn = province.rstrip("省市自治区")
+    p = next((x for x in GB2260 if pn in x["name"] or x["name"].startswith(pn)), None)
+    if not p: return {"error": f"未找到省份 {province!r}"}
+    if not city:
+        return {
+            "province": p["name"],
+            "code": (p["code"]+"0000")[:6],
+            "city_count": len(p.get("children", [])),
+            "cities": [{"name": c["name"], "code": (c["code"]+"0000")[:6]}
+                       for c in p.get("children", [])],
+        }
+    cn = city.rstrip("市地区州盟")
+    c = next((x for x in p.get("children",[]) if cn in x["name"] or x["name"].startswith(cn)), None)
+    if not c: return {"error": f"在 {p['name']} 找不到 {city!r}"}
+    return {
+        "province": p["name"], "city": c["name"],
+        "code": (c["code"]+"0000")[:6],
+        "district_count": len(c.get("children",[])),
+        "districts": [{"name": d["name"], "code": (d["code"]+"0000")[:6]}
+                      for d in c.get("children",[])],
+    }
+
+
+# ============================================================ tools: 京东司法拍卖 (H5 m. 版)
+
+@mcp.tool()
+def jd_search_judicial(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+    page: int = 1,
+) -> dict:
+    """京东司法拍卖搜索. **固定 价格降序 + 仅进行中/即将开始** (不可改).
+    走 api.m.jd.com/api functionId=getSearchData (公开 endpoint, **无需登录态**).
+
+    支持范围: 全国 33 省 / 455 市 / 5344 区县 (内置 jd_areas.json, 由 getAreaInfoMap 拉取生成).
+
+    典型用法:
+      - "查广州拍卖"      → province="广东", city="广州市"
+      - "杭州房产"       → province="浙江", city="杭州市"
+      - **"苏州吴江区"**  → province="江苏", city="苏州市", district="吴江区"
+      - "查广东"         → province="广东" (整省)
+      - 用户没说地区      → 不传 (全国 250 万+)
+
+    Args:
+        province: 省份中文名 (e.g. "广东"). 不传 = 全国.
+        city: 城市中文名 (e.g. "广州市"). 必须配 province.
+        district: 区/县中文名 (e.g. "吴江区"). 必须配 city.
+        page: 页码 (40 条/页).
+
+    Returns:
+        {count, page, items: [...]}
+        每条 item: paimaiId / title / currentPriceCN / discountRate / displayStatus 等
+
+    解析行为: 中文名模糊匹配 JD 内置地区树, 匹配不上的层级 silent skip
+    (不会乱传错码触发 server 静默 fallback 到全国).
+    """
+    r = jd.search_judicial(page=page, province=province, city=city, district=district)
+    if r.get("code") != 0:
+        return {"code": r.get("code"), "msg": r.get("msg"), "error": "JD getSearchData failed"}
+
+    data = r.get("data") or {}
+    raw_items = data.get("resultData") or []
+    items = []
+    for it in raw_items:
+        inner = it.get("data") or it
+        items.append({
+            "paimaiId":      inner.get("paimaiId"),
+            "skuId":         inner.get("skuId"),
+            "title":         inner.get("title"),
+            "currentPrice":  inner.get("currentPrice"),
+            "currentPriceCN": inner.get("currentPriceCN"),
+            "startPrice":    inner.get("startPrice"),
+            "creditCapitalCN": inner.get("creditCapitalCN"),
+            "discountRate":  inner.get("discountRate"),
+            "province":      inner.get("province"),
+            "city":          inner.get("city"),
+            "cityId":        inner.get("cityId"),
+            "countyId":      inner.get("countyId"),
+            "productCateId": inner.get("productCateId"),
+            "publishSource": inner.get("publishSource"),
+            "displayStatus": inner.get("displayStatus"),
+            "endTime":       inner.get("endTime"),
+            "remindCount":   inner.get("remindCount"),
+            "productImage":  inner.get("productImage"),
+            "houseAttributes": inner.get("houseAttributes"),
+        })
+    return {
+        "count":   len(items),
+        "page":    page,
+        "items":   items,
+    }
+
+
+@mcp.tool()
+def jd_get_supported_areas(province: str | None = None,
+                           city: str | None = None) -> dict:
+    """查 JD 端支持的地区树. 33 省 / 455 市 / 5344 区县 全覆盖.
+
+    用法:
+      - 不传: 列 33 省
+      - 传 province: 列该省的市
+      - 传 province + city: 列该市的区/县
+    """
+    if not province:
+        return {
+            "total": {
+                "provinces": len(JD_AREAS),
+                "cities": sum(len(p["cities"]) for p in JD_AREAS.values()),
+                "districts": sum(len(c["counties"]) for p in JD_AREAS.values()
+                                  for c in p["cities"].values()),
+            },
+            "provinces": list(JD_AREAS.keys()),
+            "note": "支持模糊匹配 (e.g. '广东'='广东省'); 查市传 province, 查区县再传 city.",
+        }
+    # 模糊匹配 province
+    from jd_h5_client import _match_name
+    pm = _match_name(province, JD_AREAS)
+    if not pm: return {"error": f"未找到省份 {province!r}"}
+    prov_name, prov = pm
+    if not city:
+        return {
+            "province": prov_name,
+            "city_count": len(prov["cities"]),
+            "cities": list(prov["cities"].keys()),
+        }
+    cm = _match_name(city, prov["cities"])
+    if not cm: return {"error": f"在 {prov_name} 找不到 {city!r}"}
+    city_name, c = cm
+    return {
+        "province": prov_name,
+        "city": city_name,
+        "district_count": len(c["counties"]),
+        "districts": list(c["counties"].keys()),
+    }
+
+
+# ============================================================ entry
+
+if __name__ == "__main__":
+    mcp.run()
