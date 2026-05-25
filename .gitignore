@@ -51,3 +51,6 @@ ali_flows*.mitm
 # 测试 / 临时
 /tmp/
 *_test_output.*
+.coverage
+htmlcov/
+.pytest_cache/
