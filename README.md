@@ -1,5 +1,11 @@
 # auction-mcp
 
+![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Tests](https://img.shields.io/badge/tests-47%20passing-brightgreen)
+![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
+
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
 
 ## 解决什么问题
