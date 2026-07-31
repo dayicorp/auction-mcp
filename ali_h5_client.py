@@ -119,6 +119,33 @@ def validate_location_scoped(items: list[dict[str, Any]],
     ok = (matched / total) >= min_ratio if total else True
     return {"ok": ok, "matched": matched, "total": total, "sample_off_prefix": off}
 
+def derive_ali_scope_prefix(code: str | None) -> str | None:
+    """从 Ali 地区编码推导守门校验前缀 (纯函数, 无副作用).
+
+    规则:
+      - 2 位 (XX) 或 6 位省级 (XX0000) → 返回 2 位省前缀 "XX"
+      - 4 位 (XXXX) 或 6 位市级 (XXXX00) → 返回 4 位城市前缀 "XXXX"
+      - 6 位区县级 (XXXXXX, 末两位非零) → 返回前 4 位城市范围 "XXXX"
+      - None / 空串 / 非纯数字 / 长度不是 2、4、6 → 返回 None
+      - 超过 6 位的编码禁止静默截断, 返回 None
+    """
+    if not code:
+        return None
+    s = str(code).strip()
+    if not s or not s.isdigit():
+        return None
+    if len(s) == 2:
+        return s
+    if len(s) == 4:
+        return s
+    if len(s) == 6:
+        if s[2:] == "0000":
+            return s[:2]
+        return s[:4]
+    # 长度不是 2/4/6: 禁止静默截断
+    return None
+
+
 H5_GATEWAY   = "https://h5api.m.taobao.com"
 H5_APPKEY    = "12574478"
 MOBILE_UA    = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"

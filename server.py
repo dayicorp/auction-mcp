@@ -22,7 +22,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ali_h5_client import (
     AliH5Client, resolve_area, resolve_area_ali,
-    validate_location_scoped, GB2260,
+    validate_location_scoped, derive_ali_scope_prefix, GB2260,
 )
 from jd_h5_client import JDH5Client, JD_AREAS
 
@@ -229,10 +229,9 @@ def ali_search_judicial(
     expected_prefix = None     # 用于守门校验
 
     if location_codes:
-        # 显式编码: 透传; 守门仅按 4 位前缀校验 (escape hatch)
+        # 显式编码: 透传; 守门前缀由纯函数统一推导 (省级→2位, 市/区级→4位)
         first = next((c for c in location_codes if c), None)
-        if first and len(str(first)) >= 4:
-            expected_prefix = str(first)[:4]
+        expected_prefix = derive_ali_scope_prefix(str(first)) if first else None
     elif district:
         if not city:
             return {"error": "district_requires_city",
@@ -260,7 +259,7 @@ def ali_search_judicial(
         code = resolve_area_ali(province, city)
         if code:
             location_codes = [code]
-            expected_prefix = code[:4]
+            expected_prefix = code[:4] if city else derive_ali_scope_prefix(code)
 
     # ---------- 查询 ----------
     r = ali.search_judicial(
