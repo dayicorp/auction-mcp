@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-106%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-107%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，已通过真实登录态 PC Live 验收
-- **126 项 pytest 测试** — 106 项离线通过 + 20 项 Live 默认跳过
+- **127 项 pytest 测试** — 107 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -108,7 +108,13 @@ PC 适配器只使用浏览器进程内会话：不调用 Cookie 读取接口、
 .\.venv\Scripts\python.exe scripts\manual_live_pc_matrix.py
 ```
 
-矩阵只使用页面实时返回的选项，场景之间固定等待 2 秒；遇到登录、验证码、滑块、风控或任一筛选应用失败会立即停止并保留浏览器供检查。
+矩阵只使用页面实时返回的选项，场景之间默认等待 10 秒；遇到登录、验证码、滑块、风控或任一筛选应用失败会立即停止并保留浏览器供检查。
+
+为降低风控概率，默认场景间隔为 10 秒；可只续跑尚未验收的短批次，不会保存 Cookie 或本地检查点：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\manual_live_pc_matrix.py --scenarios status,stage --delay-seconds 10
+```
 
 ## 用法示例
 
@@ -176,7 +182,7 @@ auction-mcp/
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
 ├── scripts/manual_live_pc.py # 一次性交互式 PC Live 验收入口
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
-└── tests/               # 126 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
+└── tests/               # 127 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么默认链路是纯 httpx

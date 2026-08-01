@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from ali_pc_browser_client import (
+    _redact_url,
     AliPCBrowserClient,
     AliPCBrowserError,
     build_pc_search_url,
@@ -461,6 +462,18 @@ def test_pc_matrix_scenario_requires_matching_application_receipt():
     assert accepted["accepted"] is True
     assert rejected["accepted"] is False
     assert rejected["failures"] == ["applied_filter_mismatch"]
+
+
+def test_pc_risk_control_url_redacts_x5secdata_in_reports():
+    url = (
+        "https://sf.taobao.com/_____tmd_____/punish"
+        "?x5secdata=temporary-secret&x5step=1"
+    )
+    redacted = _redact_url(url)
+
+    assert "temporary-secret" not in redacted
+    assert "x5secdata=REDACTED" in redacted
+    assert "x5step=1" in redacted
 
 
 def test_pc_search_requires_started_browser():

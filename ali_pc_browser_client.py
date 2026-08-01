@@ -25,6 +25,18 @@ _SELECT_DIMENSION_MARKERS = {
     "stage": "拍卖阶段",
     "price_range": "价格区间",
 }
+_SENSITIVE_QUERY_KEYS = {"x5secdata"}
+
+
+def _redact_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    parts = urlsplit(url)
+    query = [
+        (key, "REDACTED" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+    ]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def _select_dimension(entry: dict) -> str | None:
@@ -333,6 +345,10 @@ def evaluate_pc_matrix_scenario(
         failures.append("no_items")
 
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    diagnostics = {
+        **diagnostics,
+        "url": _redact_url(diagnostics.get("url")),
+    }
     applied_entries = result.get("appliedFilters")
     if not isinstance(applied_entries, list):
         applied_entries = diagnostics.get("appliedFilters", [])
@@ -361,7 +377,7 @@ def evaluate_pc_matrix_scenario(
             "error": result.get("error"),
             "error_message": result.get("message"),
             "diagnostics": diagnostics,
-            "url": result.get("url") or diagnostics.get("url"),
+            "url": _redact_url(result.get("url")) or diagnostics.get("url"),
             "expected_filters": expected_filters,
             "applied_filters": applied,
             "filter_mismatches": mismatches,
@@ -470,21 +486,21 @@ class AliPCBrowserClient:
                 "state": "action_required",
                 "reason": "risk_control",
                 "message": "页面进入 Ali 风控页，请用户在浏览器中手动处理；适配器不会绕过验证",
-                "url": url,
+                "url": _redact_url(url),
             }
         if any(marker in combined for marker in _VERIFICATION_MARKERS):
             return {
                 "state": "action_required",
                 "reason": "verification",
                 "message": "页面要求人工验证，请用户手动完成；适配器不会操作验证码或滑块",
-                "url": url,
+                "url": _redact_url(url),
             }
         if "login.taobao.com" in url:
             return {
                 "state": "action_required",
                 "reason": "login",
                 "message": "请用户在浏览器中手动登录，适配器不会读取或填写凭据",
-                "url": url,
+                "url": _redact_url(url),
             }
         return None
 
