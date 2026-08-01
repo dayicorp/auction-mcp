@@ -60,6 +60,53 @@ def _match_name(query: str | None, candidates: dict[str, Any]) -> tuple[str, Any
     return None
 
 
+def resolve_jd_region(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+) -> dict[str, Any]:
+    """公共纯函数: 解析中文省/市/区名到 JD 地区树.
+
+    返回各层级解析结果 (纯函数, 无副作用, 无网络):
+      {
+        "province": (name, id) | None,
+        "city": (name, id) | None,
+        "district": (name, id) | None,
+        "failed_level": "province" | "city" | "district" | None,
+      }
+    failed_level 为首个无法解析的层级; None 表示请求的层级全部解析成功.
+    """
+    result: dict[str, Any] = {
+        "province": None, "city": None, "district": None,
+        "failed_level": None,
+    }
+    if not province:
+        return result
+    pm = _match_name(province, JD_AREAS)
+    if not pm:
+        result["failed_level"] = "province"
+        return result
+    prov_name, prov = pm
+    result["province"] = (prov_name, prov["id"])
+    if not city:
+        return result
+    cm = _match_name(city, prov["cities"])
+    if not cm:
+        result["failed_level"] = "city"
+        return result
+    city_name, c = cm
+    result["city"] = (city_name, c["id"])
+    if not district:
+        return result
+    dm = _match_name(district, c["counties"])
+    if not dm:
+        result["failed_level"] = "district"
+        return result
+    county_name, county_id = dm
+    result["district"] = (county_name, county_id)
+    return result
+
+
 # ============================================================ 客户端
 
 class JDH5Client:
@@ -81,37 +128,27 @@ class JDH5Client:
                        district: str | None = None) -> dict[str, Any]:
         """中文 省/市/区县 → JD 搜索 params (multiProvinceIds / multiCityIds / multiCountyIds + Names).
 
+        复用公共纯函数 resolve_jd_region 解析地区树, 不复制逻辑.
         不认识的层级 silent skip (不报错, 也不乱传错码触发 server 静默全国 fallback).
         district 必须配 city, city 必须配 province.
         """
         out: dict[str, Any] = {}
-        if not province:
-            return out
-        m = _match_name(province, JD_AREAS)
-        if not m:
-            return out
-        prov_name, prov = m
-        out["positionProvinceId"] = prov["id"]
-        out["multiProvinceIds"]   = prov["id"]
-        out["multiProvinceNames"] = prov_name
-        if not city:
-            return out
-        cm = _match_name(city, prov["cities"])
-        if not cm:
-            return out
-        city_name, c = cm
-        out["positionCityId"]   = c["id"]
-        out["multiCityIds"]     = c["id"]
-        out["positionCityNames"] = city_name
-        out["multiCityNames"]   = city_name
-        if not district:
-            return out
-        dm = _match_name(district, c["counties"])
-        if not dm:
-            return out
-        county_name, county_id = dm
-        out["multiCountyIds"]   = county_id
-        out["multiCountyNames"] = county_name
+        resolved = resolve_jd_region(province, city, district)
+        if resolved["province"]:
+            prov_name, prov_id = resolved["province"]
+            out["positionProvinceId"] = prov_id
+            out["multiProvinceIds"]   = prov_id
+            out["multiProvinceNames"] = prov_name
+        if resolved["city"]:
+            city_name, city_id = resolved["city"]
+            out["positionCityId"]   = city_id
+            out["multiCityIds"]     = city_id
+            out["positionCityNames"] = city_name
+            out["multiCityNames"]   = city_name
+        if resolved["district"]:
+            county_name, county_id = resolved["district"]
+            out["multiCountyIds"]   = county_id
+            out["multiCountyNames"] = county_name
         return out
 
     # 默认产品行为, 不暴露:

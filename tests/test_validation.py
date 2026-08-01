@@ -261,16 +261,18 @@ def test_city_guard_rejects_other_city_results(monkeypatch):
 
 
 def test_invalid_city_fail_closed_guard(monkeypatch):
-    """无效 city='不存在市' 降级为省编码时, 守门仍用 4 位假前缀 '4400' fail-closed.
+    """无效 city='不存在市' 在 Ali 单源入口解析预检即被拒绝, 不发起 provider 调用.
 
-    场景: resolve_area_ali('广东', '不存在市') 找不到城市 → 回退返回省编码 '440000'.
-    修复前风险: derive_ali_scope_prefix('440000')='44' → 广东下级结果全通过 → 用户以为查了某市实际查了全省.
-    修复后: city 有值时强制 code[:4]='4400' → 真实编码 4401xx/4403xx 不匹配 → 守门拒绝.
+    场景: '不存在市' 在 GB2260 2020 和 JD 地区树均无法解析
+    → _validate_ali_pc_resolution 识别为 city 解析失败 → 返回 region_resolution_failed.
+    P0 的守门 fail-closed 逻辑保留作二重防线, 但正常不会触发了.
     """
     import server
 
+    ali_calls = {"count": 0}
+
     def fake_search_judicial(**kwargs):
-        # 模拟阿里返回正常广东下级城市编码
+        ali_calls["count"] += 1
         return _make_ali_success_response(["440103", "440106", "440305", "440306",
                                            "440104", "440105", "440111", "440112",
                                            "440307", "440308"])
@@ -279,7 +281,7 @@ def test_invalid_city_fail_closed_guard(monkeypatch):
 
     result = server.ali_search_judicial(province="广东", city="不存在市")
 
-    # 断言守门拒绝 (fail-closed)
-    assert result.get("error") == "ali_returned_unscoped_results"
-    assert result["diagnostics"]["expected_prefix"] == "4400"
-    assert result.get("items") == []
+    # 断言在解析预检层即被拒绝, 不发起网络调用
+    assert result.get("error") == "region_resolution_failed"
+    assert result["diagnostics"]["resolution"] == "city"
+    assert ali_calls["count"] == 0

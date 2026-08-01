@@ -24,7 +24,7 @@ from ali_h5_client import (
     AliH5Client, resolve_area, resolve_area_ali,
     validate_location_scoped, derive_ali_scope_prefix, GB2260,
 )
-from jd_h5_client import JDH5Client, JD_AREAS
+from jd_h5_client import JDH5Client, JD_AREAS, resolve_jd_region
 
 # ============================================================ init
 
@@ -58,6 +58,139 @@ ali = AliH5Client()
 
 # 京东 m. 版 client (无 sign, 无登录态)
 jd = JDH5Client()
+
+# ============================================================ 共享地区层级验证
+
+def _validate_area_structural(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+) -> dict | None:
+    """结构完整性验证 — 子级必须携带父级.
+
+    返回 None = 通过; 返回 dict = 错误.
+    """
+    if city and not province:
+        return {"error": "city_requires_province",
+                "message": "传 city 必须同时传 province"}
+    if district and not city:
+        return {"error": "district_requires_city",
+                "message": "传 district 必须同时传 city"}
+    return None
+
+
+def _validate_region_resolution(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+) -> dict | None:
+    """地区解析验证 — 确认地区参数可被至少一个数据源解析.
+
+    使用 GB 2260 2020 版 + JD 地区树 双源解析.
+    无法解析时返回 region_resolution_failed + diagnostics.
+    返回 None = 通过.
+    """
+    if not province:
+        return None
+
+    # province 必须可解析 (GB2260 2020 或 JD 地区树)
+    p_code = resolve_area(province)
+    jd_r = resolve_jd_region(province)
+    if p_code is None and jd_r["province"] is None:
+        return {"error": "region_resolution_failed",
+                "diagnostics": {
+                    "resolution": "province",
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                }}
+
+    if city:
+        # city 必须可解析且归属 province
+        c_code = resolve_area(province, city) if p_code else None
+        jd_city_ok = False
+        if jd_r["province"] is not None:
+            jd_r2 = resolve_jd_region(province, city)
+            jd_city_ok = jd_r2["city"] is not None
+        if (c_code is None or c_code == p_code) and not jd_city_ok:
+            return {"error": "region_resolution_failed",
+                    "diagnostics": {
+                        "resolution": "city",
+                        "province": province,
+                        "city": city,
+                        "district": district,
+                    }}
+
+    if district:
+        # district 必须可解析且归属 city
+        d_code = resolve_area(province, city, district) if p_code else None
+        c_code_d = resolve_area(province, city) if p_code else None
+        jd_district_ok = False
+        if jd_r["province"] is not None:
+            jd_r3 = resolve_jd_region(province, city, district)
+            jd_district_ok = jd_r3["district"] is not None
+        if (d_code is None or d_code == c_code_d) and not jd_district_ok:
+            return {"error": "region_resolution_failed",
+                    "diagnostics": {
+                        "resolution": "district",
+                        "province": province,
+                        "city": city,
+                        "district": district,
+                    }}
+
+    return None
+
+
+def _validate_ali_pc_resolution(
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+) -> dict | None:
+    """Ali 单源省/市解析预检 — 在任何 Ali provider 调用前拒绝无法解析的 province/city.
+
+    仅验证 province 和 city; district 本身不验证 (允许动态学码 + title_filter 兜底).
+    必须使用 Ali 实际采用的 pre-2013 地区表，不能用现代 GB2260/JD 的
+    “任一可解析”结果代替，否则会放过 Ali 已静默降级到省级的城市。
+    返回 None = 通过; 返回 dict = region_resolution_failed 错误.
+    """
+    if not province:
+        return None
+
+    p_code = resolve_area_ali(province)
+    if p_code is None:
+        return {"error": "region_resolution_failed",
+                "diagnostics": {
+                    "resolution": "province",
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                }}
+
+    if city:
+        c_code = resolve_area_ali(province, city)
+        # 北京/天津/上海/重庆的“市”层级与省级共用 XX0000 编码；仅当
+        # 省市名称确实指向同一直辖市时允许同码，其他同码均是解析降级。
+        municipality_by_prefix = {
+            "11": "北京", "12": "天津", "31": "上海", "50": "重庆",
+        }
+        municipality = municipality_by_prefix.get(p_code[:2])
+        municipality_aliases = (
+            {municipality, f"{municipality}市"} if municipality else set()
+        )
+        same_municipality = (
+            province in municipality_aliases and city in municipality_aliases
+        )
+        if c_code is None or (c_code == p_code and not same_municipality):
+            return {"error": "region_resolution_failed",
+                    "diagnostics": {
+                        "resolution": "city",
+                        "province": province,
+                        "city": city,
+                        "district": district,
+                    }}
+
+    return None
+
 
 # ============================================================ tools: 阿里司法拍卖 (H5 mtop)
 
@@ -146,6 +279,14 @@ def search_judicial(
           errors?: {ali?: {...}, jd?: {...}},    # 任一端失败的诊断信息
         }
     """
+    # --- 结构验证 + 解析验证: 在 ThreadPoolExecutor 前拒绝非法地区参数 ---
+    _verr = _validate_area_structural(province, city, district)
+    if _verr:
+        return _verr
+    _rerr = _validate_region_resolution(province, city, district)
+    if _rerr:
+        return _rerr
+
     with cf.ThreadPoolExecutor(max_workers=2) as ex:
         f_ali = ex.submit(ali_search_judicial, province, city, district, page)
         f_jd  = ex.submit(jd_search_judicial,  province, city, district, page)
@@ -223,6 +364,17 @@ def ali_search_judicial(
         正常: {count, page, totalCount, items, validated, [matched_district_code], [_district_fallback]}
         阿里返垃圾(乱掺其他省市): {error: "ali_returned_unscoped_results", diagnostics, items: []}
     """
+    # --- 结构验证: 在 provider 调用前拒绝结构非法参数 ---
+    _verr = _validate_area_structural(province, city, district)
+    if _verr:
+        return _verr
+
+    # --- 省/市解析预检: 未知 province/city 在任何 Ali 调用前返回 ---
+    if not location_codes:
+        _rerr = _validate_ali_pc_resolution(province, city, district)
+        if _rerr:
+            return _rerr
+
     # ---------- 解析 location_codes ----------
     fallback_used = None       # 客户端 title 过滤兜底标志
     matched_district = None    # 最终命中的区县码 (若 district 路径)
@@ -239,7 +391,7 @@ def ali_search_judicial(
         # 主: legacy 数据集解析
         ali_code = resolve_area_ali(province, city, district)
         city_code = resolve_area_ali(province, city) or ""
-        expected_prefix = city_code[:4] if city_code else None
+        expected_prefix = derive_ali_scope_prefix(city_code)
 
         is_district_hit = ali_code and ali_code != city_code and not ali_code.endswith("00")
         if is_district_hit:
@@ -259,7 +411,7 @@ def ali_search_judicial(
         code = resolve_area_ali(province, city)
         if code:
             location_codes = [code]
-            expected_prefix = code[:4] if city else derive_ali_scope_prefix(code)
+            expected_prefix = derive_ali_scope_prefix(code)
 
     # ---------- 查询 ----------
     r = ali.search_judicial(
@@ -428,6 +580,22 @@ def jd_search_judicial(
     解析行为: 中文名模糊匹配 JD 内置地区树, 匹配不上的层级 silent skip
     (不会乱传错码触发 server 静默 fallback 到全国).
     """
+    # --- 结构验证 + JD 地区树解析验证: 在 provider 调用前拒绝非法参数 ---
+    _verr = _validate_area_structural(province, city, district)
+    if _verr:
+        return _verr
+
+    if province:
+        _jd_resolved = resolve_jd_region(province, city, district)
+        if _jd_resolved["failed_level"]:
+            return {"error": "region_resolution_failed",
+                    "diagnostics": {
+                        "resolution": _jd_resolved["failed_level"],
+                        "province": province,
+                        "city": city,
+                        "district": district,
+                    }}
+
     r = jd.search_judicial(page=page, province=province, city=city, district=district)
     if r.get("code") != 0:
         return {"code": r.get("code"), "msg": r.get("msg"), "error": "JD getSearchData failed"}
@@ -487,19 +655,21 @@ def jd_get_supported_areas(province: str | None = None,
             "note": "支持模糊匹配 (e.g. '广东'='广东省'); 查市传 province, 查区县再传 city.",
         }
     # 模糊匹配 province
-    from jd_h5_client import _match_name
-    pm = _match_name(province, JD_AREAS)
-    if not pm: return {"error": f"未找到省份 {province!r}"}
-    prov_name, prov = pm
+    resolved = resolve_jd_region(province, city)
+    if resolved["province"] is None:
+        return {"error": f"未找到省份 {province!r}"}
+    prov_name, _prov_id = resolved["province"]
+    prov = JD_AREAS[prov_name]
     if not city:
         return {
             "province": prov_name,
             "city_count": len(prov["cities"]),
             "cities": list(prov["cities"].keys()),
         }
-    cm = _match_name(city, prov["cities"])
-    if not cm: return {"error": f"在 {prov_name} 找不到 {city!r}"}
-    city_name, c = cm
+    if resolved["city"] is None:
+        return {"error": f"在 {prov_name} 找不到 {city!r}"}
+    city_name, _city_id = resolved["city"]
+    c = prov["cities"][city_name]
     return {
         "province": prov_name,
         "city": city_name,
