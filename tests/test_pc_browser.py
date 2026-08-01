@@ -143,10 +143,11 @@ def test_pc_detail_live_regression_prefers_candidates_with_actual_values():
     snapshot = _ready_detail_snapshot()
     snapshot.update({
         "title": "一拍 江门市蓬江区泰和广场11号之三402室",
-        "statusText": "即将开始",
+        "statusText": None,
         "stageText": "一拍",
         "bodyText": (
-            "一拍 2026-08-06 10:00开拍 0人报名 27人设置提醒 941次围观 "
+            "一拍 距开始 04天09时01分 2026-08-06 10:00开拍 "
+            "0人报名 27人设置提醒 941次围观 "
             "江门市蓬江区人民法院"
         ),
         "labelBlocks": {
@@ -194,6 +195,34 @@ def test_pc_detail_live_regression_prefers_candidates_with_actual_values():
     assert detail["biddingPeriod"] == "1天"
     assert detail["contact"] == {"name": "陈生", "phone": None}
     assert detail["status"] == "即将开始"
+
+
+@pytest.mark.parametrize(
+    ("visible_text", "expected"),
+    [
+        ("距开始 04天09时01分", "即将开始"),
+        ("距离开拍还有 3 小时", "即将开始"),
+        ("距结束 01天02时", "正在进行"),
+    ],
+)
+def test_pc_detail_status_normalizes_only_explicit_countdown_semantics(
+    visible_text,
+    expected,
+):
+    assert _detail_status({"bodyText": visible_text}) == expected
+
+
+@pytest.mark.parametrize(
+    "ambiguous_text",
+    [
+        "04天09时01分15秒",
+        "开拍时间 2026-08-06 10:00",
+        "即将",
+        "拍卖倒计时",
+    ],
+)
+def test_pc_detail_status_fails_closed_for_ambiguous_countdown_text(ambiguous_text):
+    assert _detail_status({"bodyText": ambiguous_text}) is None
 
 
 def test_pc_detail_contact_bare_label_returns_null_instead_of_punctuation():
@@ -913,6 +942,37 @@ def test_pc_detail_ready_gate_rejects_bare_labels_without_values():
     assert diagnostics["price_ready"] is False
     assert diagnostics["periods_ready"] is False
     assert diagnostics["status_ready"] is True
+
+
+def test_pc_detail_ready_gate_rejects_ambiguous_status_text():
+    snapshot = _ready_detail_snapshot()
+    snapshot["statusText"] = None
+    snapshot["bodyText"] = snapshot["bodyText"].replace(
+        "即将开始",
+        "开拍时间",
+    )
+
+    class FakePage:
+        url = "https://sf-item.taobao.com/sf_item/1062507630078.htm"
+
+        async def evaluate(self, script):
+            return snapshot
+
+        async def title(self):
+            return "江门住宅详情"
+
+        async def wait_for_timeout(self, timeout):
+            raise AssertionError("零超时门禁不应继续等待")
+
+    client = AliPCBrowserClient(timeout_ms=0)
+    client._page = FakePage()
+    _, diagnostics = asyncio.run(
+        client._wait_for_detail_snapshot("1062507630078")
+    )
+
+    assert diagnostics["price_ready"] is True
+    assert diagnostics["periods_ready"] is True
+    assert diagnostics["status_ready"] is False
 
 
 def test_pc_detail_query_returns_structured_ready_snapshot_without_cookie_state():

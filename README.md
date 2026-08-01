@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-143%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-151%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
-- **163 项 pytest 测试** — 143 项离线通过 + 20 项 Live 默认跳过
+- **171 项 pytest 测试** — 151 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -205,7 +205,7 @@ auction-mcp/
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
 ├── scripts/manual_live_pc_pagination.py # 人工确认关闭的 PC 分页协议发现
 ├── scripts/manual_live_pc_page2.py # 正式 page=2 交互式 PC Live 验收
-└── tests/               # 163 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
+└── tests/               # 171 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -224,7 +224,9 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 
 ## Roadmap
 
-- [ ] **P2.9-D PC 拍品详情修正后 Live 复验** — P2.9-C 已完成离线修正；待在新的非持久化登录会话中对同一标的执行一次正式调用，核验起拍价、评估价、保证金、加价幅度、状态、延时周期、竞价周期及联系人均不存在假值或假通过。全程不读取、导出或保存 Cookie
+- [ ] **P2.9-F PC 拍品详情状态修正后 Live 复验** — P2.9-E 已完成离线修正；待在新的非持久化登录会话中对同一标的执行一次正式调用，完整核验金额、状态、周期、联系人、正文、URL 与 Cookie 边界。全程不读取、导出或保存 Cookie
+- [x] **P2.9-E PC 拍品详情状态语义修正** — 2026-08-01 将真实可见“距开始/距离开始/距开拍/即将开拍”严格规范化为“即将开始”，将“距结束/距离结束”规范化为“正在进行”；只有日期、裸倒计时数字或“即将”等歧义文本继续 fail-closed。151 项离线测试通过，20 项 Live 保持跳过
+- [x] **P2.9-D PC 拍品详情修正后 Live（验收 FAIL）** — 2026-08-01 唯一一次调用中金额、周期、正文、附件和 URL 五项 ready 门禁均通过，仅 `status_ready=false`；工具正确返回 `pc_detail_content_not_ready`，没有再次输出半完整详情或假通过
 - [x] **P2.9-C PC 拍品详情解析修正** — 2026-08-01 针对 P2.9-B 真实失败样本修复：DOM 候选优先选择标签后的实际值；金额支持跳过裸标签并回退“标的询价平均值”；状态从独立可见节点读取；周期只接受带单位的数值；联系人缺失时返回 null；ready 门禁必须同时具备实际金额、状态和两个周期值。143 项离线测试通过，20 项 Live 保持跳过
 - [x] **P2.9-B PC 拍品详情首次正式 Live（验收 FAIL）** — 2026-08-01 唯一一次调用正确进入标的 `1062507630078`，URL/正文/异步容器/Cookie 边界通过；但捕获到金额全为 null、联系人误解析为冒号、周期只有标签、状态为 null，否决最小验收器的假通过并进入 P2.9-C 修正
 - [x] **P2.8 PC 拍品详情协议发现** — 2026-08-01 从已验收江门住宅列表唯一进入 `sf-item.taobao.com/sf_item/1062507630078.htm`，确认可见 DOM 包含阶段、状态、价格、时间、法院、联系人、位置、正文和附件容器；发现正文/附件存在异步“加载中”边界，必须轮询后再解析。只进入一个详情页，Cookie 未读取、导出或保存

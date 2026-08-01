@@ -274,20 +274,34 @@ def _detail_period(snapshot: dict[str, Any], label: str) -> str | None:
 
 
 def _detail_status(snapshot: dict[str, Any], page_title: str = "") -> str | None:
+    direct_statuses = ("正在进行", "即将开始", "已结束", "中止", "撤回")
+    status_text = str(snapshot.get("statusText") or "").strip()
+    if status_text in direct_statuses:
+        return status_text
     combined = " ".join(
         str(value)
         for value in (
-            snapshot.get("statusText"),
             snapshot.get("bodyText"),
             snapshot.get("title"),
             page_title,
         )
         if value
     )
+    for marker, normalized in (
+        ("距离开始", "即将开始"),
+        ("距开始", "即将开始"),
+        ("距离开拍", "即将开始"),
+        ("距开拍", "即将开始"),
+        ("即将开拍", "即将开始"),
+        ("距离结束", "正在进行"),
+        ("距结束", "正在进行"),
+    ):
+        if marker in combined:
+            return normalized
     return next(
         (
             candidate
-            for candidate in ("正在进行", "即将开始", "已结束", "中止", "撤回")
+            for candidate in direct_statuses
             if candidate in combined
         ),
         None,
