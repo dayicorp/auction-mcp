@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-107%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-114%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，已通过真实登录态 PC Live 验收
-- **127 项 pytest 测试** — 107 项离线通过 + 20 项 Live 默认跳过
+- **134 项 pytest 测试** — 114 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -116,6 +116,14 @@ PC 适配器只使用浏览器进程内会话：不调用 Cookie 读取接口、
 .\.venv\Scripts\python.exe scripts\manual_live_pc_matrix.py --scenarios status,stage --delay-seconds 10
 ```
 
+P2.6 分页协议发现必须从用户可见的 PowerShell 启动，避免浏览器生命周期绑定到 Codex 临时工具进程：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\manual_live_pc_pagination.py
+```
+
+脚本会在人工登录后等待用户按 Enter；唯一识别真实“下一页”控件后，只有输入完整口令 `TURN` 才执行一次翻页，并核验两页 URL、页码指示和标的 ID 重叠。无论成功、失败或异常，脚本都会先输出 `PC_PAGINATION_DISCOVERY`，随后无限等待；只有输入完整口令 `CLOSE` 才关闭浏览器，其他输入均继续保持，不设置自动关闭超时。
+
 ## 用法示例
 
 ```python
@@ -182,7 +190,8 @@ auction-mcp/
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
 ├── scripts/manual_live_pc.py # 一次性交互式 PC Live 验收入口
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
-└── tests/               # 127 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
+├── scripts/manual_live_pc_pagination.py # 人工确认关闭的 PC 分页协议发现
+└── tests/               # 134 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -202,6 +211,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 ## Roadmap
 
 - [ ] **阿里拍品详情** — `queryHttpsItemDetail` mtop 被 baxia 风控拦 (需 `cna + tfstk + isg` cookie). 已规划: 本机 headless Playwright 一次性预热 cookie 注入 httpx, RGV587 时自动重预热.
+- [x] **P2.6 PC 分页协议发现** — 2026-08-01 在用户可见 PowerShell 持有的非持久化登录会话中通过：唯一可用控件为 `a.next`，第二页 URL 明确增加 `page=2`，页码指示由 1 变为 2；第一页/第二页分别解析 64/66 个去重标的，重叠 10 个、第二页新增 56 个、合并后共 120 个唯一标的。全程只翻页一次，未读取、导出或保存 Cookie
 - [x] **P2.5 PC 完整筛选能力矩阵** — 2026-08-01 完成真实登录态分批 Live 验收：关键词、区县、资产类型、排序、拍卖状态、拍卖阶段六个场景均 `accepted=true`、无筛选不一致；遇到 TMD 滑块后由用户人工验证，并以短批次恢复剩余场景。全程未读取、导出或保存 Cookie
 - [x] **P2.4 PC 完整筛选交互式 Live 验收** — 2026-08-01 在用户手动登录的非持久化 Chrome 会话中通过固定查询验收：20/20 条、价格 100360–195097 元、无超限或缺价项、查询参数完全匹配，Cookie 未导出或持久化
 - [x] ~~双端聚合 + 价格单位归一~~ (v2.1, 见 `search_judicial`)
