@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-74%20passed%20%7C%2019%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-76%20passed%20%7C%2019%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
@@ -26,7 +26,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **地区参数 fail-closed** — 层级缺失或地区无法解析时, 在请求 Ali/JD provider 前返回结构化错误
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **93 项 pytest 测试** — 74 项离线通过 + 19 项 Live 默认跳过
+- **95 项 pytest 测试** — 76 项离线通过 + 19 项 Live 默认跳过
 
 ## Quick start
 
@@ -54,7 +54,7 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | ⭐ **`search_judicial`** | `province?`, `city?`, `district?`, `page=1`, `limit=20` | **推荐默认调用** — 并行查 阿里+京东, 价格降序合并, 单位归一到元 |
-| `ali_search_judicial` | `province?`, `city?`, `district?`, `page=1`, `fcat_v4_ids?`, `zc_biz_types?` | [Advanced 单源] 仅查阿里；分类/资产类型编码来自 `ali_get_filter_options` |
+| `ali_search_judicial` | `province?`, `city?`, `district?`, `page=1`, `fcat_v4_ids?`, `circs?`, `tag_ids?`, `zc_biz_types?` | [Advanced 单源] 仅查阿里；高级筛选编码来自 `ali_get_filter_options` |
 | `ali_get_supported_areas` | `province?`, `city?` | 列阿里支持的省/市/区县中文名 |
 | `ali_get_filter_options` | (无) | 阿里 9 个 filter 维度的完整可选项 |
 | `jd_search_judicial` | `province?`, `city?`, `district?`, `page=1` | [Advanced 单源] 仅查京东 |
@@ -125,7 +125,7 @@ auction-mcp/
 ├── gb2260.json          # GB 2260 2020 版 (展示用, 不用于查询)
 ├── gb2260_200712.json   # GB 2260 pre-2013 (阿里 server 实际接受的 vintage)
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
-└── tests/               # 93 项 pytest (含 region boundary / resolve / validation / resilience / live)
+└── tests/               # 95 项 pytest (含 region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么是纯 httpx
@@ -143,7 +143,7 @@ v2 转向走移动浏览器 H5 mtop:
 ## Roadmap
 
 - [ ] **阿里拍品详情** — `queryHttpsItemDetail` mtop 被 baxia 风控拦 (需 `cna + tfstk + isg` cookie). 已规划: 本机 headless Playwright 一次性预热 cookie 注入 httpx, RGV587 时自动重预热.
-- [ ] 暴露更多筛选维度 (价格区间 / 分类中文名 / 关键词；Ali Advanced 已支持分类和资产类型编码)
+- [ ] 暴露更多筛选维度 (价格区间 / 分类中文名 / 关键词；Ali Advanced 已支持分类/轮次/标签/资产类型编码)
 - [x] ~~双端聚合 + 价格单位归一~~ (v2.1, 见 `search_judicial`)
 
 ## License

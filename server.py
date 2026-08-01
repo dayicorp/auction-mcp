@@ -335,12 +335,14 @@ def ali_search_judicial(
     page: int = 1,
     location_codes: list[str] | None = None,
     fcat_v4_ids: list[str] | None = None,
+    circs: list[str] | None = None,
+    tag_ids: list[str] | None = None,
     zc_biz_types: list[str] | None = None,
 ) -> dict:
     """**[Advanced 单源]** 阿里司法拍卖搜索. 默认情况下用 `search_judicial` 同时拿两端, 别单独调这个.
 
     仅当用户**明确**要"只查阿里" / 想用 location_codes / fcat_v4_ids /
-    zc_biz_types 等高级参数时才用.
+    circs / tag_ids / zc_biz_types 等高级参数时才用.
 
     **固定 价格降序 + 仅进行中/即将开始** (不可改).
 
@@ -361,6 +363,8 @@ def ali_search_judicial(
         page:     页码 (10 条/页)
         location_codes: (高级, escape hatch) 直接传编码列表; 仍会跑垃圾结果守门
         fcat_v4_ids:    (高级) 分类编码列表, 见 ali_get_filter_options
+        circs:          (高级) 拍卖轮次编码列表, 见 ali_get_filter_options
+        tag_ids:        (高级) 特性标签编码列表, 见 ali_get_filter_options
         zc_biz_types:   (高级) 资产类型编码列表, 见 ali_get_filter_options 的 zcBizTypes
 
     Returns:
@@ -423,6 +427,8 @@ def ali_search_judicial(
         status_orders=["0", "1"],
         location_codes=location_codes,
         fcat_v4_ids=fcat_v4_ids,
+        circs=circs,
+        tag_ids=tag_ids,
         zc_biz_types=zc_biz_types,
     )
     ret_first = (r.get("ret") or [""])[0] if isinstance(r.get("ret"), list) else str(r.get("ret") or "")

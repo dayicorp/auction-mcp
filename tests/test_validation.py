@@ -326,3 +326,43 @@ def test_ali_client_serializes_zc_biz_types_filter(monkeypatch):
     df_variables = json.loads(captured["data"]["dfVariables"])
     filters = json.loads(df_variables["context"]["_c_searchlistsf-items"])
     assert filters["zcBizTypes"] == ["1", "7"]
+
+
+def test_ali_search_passes_circs_and_tag_ids_to_provider(monkeypatch):
+    """公开 Ali Advanced 工具应原样透传拍卖轮次和特性标签编码."""
+    import server
+
+    captured: dict[str, Any] = {}
+
+    def fake_search_judicial(**kwargs):
+        captured.update(kwargs)
+        return _make_ali_success_response([])
+
+    monkeypatch.setattr(server.ali, "search_judicial", fake_search_judicial)
+
+    result = server.ali_search_judicial(circs=["1", "2"], tag_ids=["101"])
+
+    assert result.get("error") is None
+    assert captured["circs"] == ["1", "2"]
+    assert captured["tag_ids"] == ["101"]
+
+
+def test_ali_client_serializes_circs_and_tag_ids_filters(monkeypatch):
+    """Ali client 应使用 API 要求的 circs 和 tagIds filter 名称."""
+    from ali_h5_client import AliH5Client
+
+    client = AliH5Client()
+    captured: dict[str, Any] = {}
+
+    def fake_call_mtop(api, version, data, method="POST"):
+        captured.update({"data": data})
+        return {"ret": ["SUCCESS::调用成功"]}
+
+    monkeypatch.setattr(client, "call_mtop", fake_call_mtop)
+
+    client.search_judicial(circs=["1", "2"], tag_ids=["101"])
+
+    df_variables = json.loads(captured["data"]["dfVariables"])
+    filters = json.loads(df_variables["context"]["_c_searchlistsf-items"])
+    assert filters["circs"] == ["1", "2"]
+    assert filters["tagIds"] == ["101"]
