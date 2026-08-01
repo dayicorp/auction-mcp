@@ -1,7 +1,9 @@
 """MCP server for 京东 + 阿里 司法拍卖 (实时, 无需 iPad sign bridge).
 
 v2 设计原则:
-- **零依赖外部设备/桥**. 完全本地 Python httpx + MCP stdio.
+- 默认双端聚合完全本地 Python httpx + MCP stdio, 零依赖外部设备/桥.
+- 阿里 PC 完整筛选是显式 Interactive Advanced 链路, 使用非持久化可见 Chrome;
+  不读取、导出或保存用户 Cookie, 登录和验证码只由用户手动完成.
 - 阿里端走 H5 mtop 网关 (`h5api.m.taobao.com`), sign 是公开 MD5 算法, 不需要 app 端 anti-tamper SDK.
   实现见 ali_h5_client.py. 这个路径跟 app 拿同一个 endpoint (`mtop.taobao.datafront.invoke.auctionwalle`)
   和同一组数据.
@@ -24,6 +26,7 @@ from ali_h5_client import (
     AliH5Client, resolve_area, resolve_area_ali,
     validate_location_scoped, derive_ali_scope_prefix, GB2260,
 )
+from ali_pc_browser_client import AliPCBrowserClient
 from jd_h5_client import JDH5Client, JD_AREAS, resolve_jd_region
 
 # ============================================================ init
@@ -47,9 +50,13 @@ mcp = FastMCP(
         "3. 阿里支持 31 省 / 3146 区县, 京东支持 33 省 / 5344 区县, 区县直接传 district 中文名,\n"
         "   工具自动解析两端各自的内部编码. ⚠️ 不要自己从 *_get_supported_areas 拿 code 再传\n"
         "   location_codes — 那是 2020 版仅供人类参考, 阿里 server 用 pre-2013 vintage, 错位会乱掺.\n"
-        "4. 用户问 '排序 / 状态' 怎么改: 告诉他不能改 (固定='价格降序'+'仅进行中/即将开始').\n"
+        "4. 默认双端/H5 查询固定='价格降序'+'仅进行中/即将开始'；用户明确要求其他排序或状态时，\n"
+        "   使用第 6 条的 PC 浏览器链路，不要把 PC 参数塞进 H5 请求。\n"
         "5. search_judicial 返回每条 item 带 `platform: 'ali'|'jd'` + 归一化 `price_yuan` (元),\n"
         "   方便上层做对比. 单源原生字段也保留 (itemId / paimaiId 等).\n"
+        "6. 用户明确要求阿里 PC 完整筛选 (关键词/价格/开始时间/任意状态或阶段) 时，先调用\n"
+        "   ali_pc_browser_start；用户在弹出的 Chrome 手动登录后，再调用 ali_pc_search_judicial。\n"
+        "   PC 浏览器链路不读取或保存 Cookie，遇到登录/验证码/滑块必须交给用户手动完成。\n"
     ),
 )
 
@@ -58,6 +65,9 @@ ali = AliH5Client()
 
 # 京东 m. 版 client (无 sign, 无登录态)
 jd = JDH5Client()
+
+# 阿里 PC 浏览器 client (lazy start; 非持久化 context，不导出或保存 Cookie)
+ali_pc = AliPCBrowserClient()
 
 # ============================================================ 共享地区层级验证
 
@@ -594,6 +604,92 @@ def ali_get_filter_options() -> dict:
             "options": opts,
         })
     return {"dimensions": dims, "count": len(dims)}
+
+
+# ============================================================ tools: 阿里 PC 登录态浏览器
+
+@mcp.tool()
+async def ali_pc_browser_start() -> dict:
+    """启动阿里 PC 查询专用的可见 Chrome 会话.
+
+    仅当用户明确要求关键词、价格区间、开始时间、任意排序/状态/阶段等
+    PC 完整筛选能力时调用。浏览器使用非持久化 context；适配器不读取
+    Cookie、不导出 storage_state、不保存用户配置目录。
+
+    如果返回 login_required，请让用户在弹出的 Chrome 中手动登录；
+    如果返回 action_required，请让用户手动处理登录、验证码或滑块。
+    """
+    return await ali_pc.start()
+
+
+@mcp.tool()
+async def ali_pc_browser_status() -> dict:
+    """检查阿里 PC 浏览器会话是否已启动及是否完成用户手动登录."""
+    return await ali_pc.status()
+
+
+@mcp.tool()
+async def ali_pc_search_judicial(
+    keyword: str | None = None,
+    category: str | None = None,
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+    asset_type: str | None = None,
+    sort: str | None = None,
+    status: str | None = None,
+    stage: str | None = None,
+    min_price_yuan: int | None = None,
+    max_price_yuan: int | None = None,
+    auction_start_from: str | None = None,
+    auction_start_to: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """**[Interactive Experimental]** 通过登录态 PC 页面执行阿里司法拍卖完整筛选.
+
+    使用前必须先调用 `ali_pc_browser_start`，并由用户在弹出的 Chrome 中
+    手动完成登录或验证。适配器不会读取、导出或持久化 Cookie。
+
+    Args:
+        keyword: 标的物名称/地理位置/执行案号关键词。真实页面会在关键词
+                 搜索时清空其他筛选，因此不可与下面任一筛选组合。
+        category: 分类中文名，如“住宅用房”“商业用房”。运行时从页面动态解析。
+        province/city/district: 页面显示的省、市、区县中文名，按层级提供。
+        asset_type: 资产类型中文名，如“诉讼资产”“破产资产”。
+        sort: 页面排序中文名，如“当前价格由高到低”。
+        status: 拍卖状态中文名，如“正在进行”“即将开始”“已结束”“中止”“撤回”。
+        stage: 拍卖阶段中文名，如“一拍”“二拍”“重新拍卖”“变卖”。
+        min_price_yuan/max_price_yuan: 价格下限/上限，单位为整数人民币元。
+        auction_start_from/auction_start_to: 开始日期范围，YYYY-MM-DD，必须同时提供。
+        limit: 最多返回当前页面识别出的拍品数，1-100。
+
+    Returns:
+        成功: {source, count, items, url, authenticated_session, cookie_policy}
+        需人工操作: {state: action_required, reason, message, url}
+        失败: {error, message, diagnostics}
+    """
+    return await ali_pc.search(
+        keyword=keyword,
+        category=category,
+        province=province,
+        city=city,
+        district=district,
+        asset_type=asset_type,
+        sort=sort,
+        status=status,
+        stage=stage,
+        min_price_yuan=min_price_yuan,
+        max_price_yuan=max_price_yuan,
+        auction_start_from=auction_start_from,
+        auction_start_to=auction_start_to,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def ali_pc_browser_close() -> dict:
+    """关闭阿里 PC 浏览器会话并销毁进程内登录态."""
+    return await ali_pc.close()
 
 
 @mcp.tool()

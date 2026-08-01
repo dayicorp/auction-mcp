@@ -3,10 +3,10 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-80%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-95%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
-司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
+司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
 
 ## 解决什么问题
 
@@ -26,7 +26,8 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **地区参数 fail-closed** — 层级缺失或地区无法解析时, 在请求 Ali/JD provider 前返回结构化错误
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **100 项 pytest 测试** — 80 项离线通过 + 20 项 Live 默认跳过
+- **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，需交互式 Live 验收
+- **115 项 pytest 测试** — 95 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -44,12 +45,12 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```
 
 ```bash
-pip install -r requirements.txt    # mcp, httpx, pytest
+pip install -r requirements.txt    # mcp, httpx, playwright, pytest
 pytest                             # 单元 + 容错 (零网络)
 pytest --run-live                  # + 集成 (真打 Ali/JD API)
 ```
 
-## 工具 (6 个)
+## 工具 (10 个)
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
@@ -57,10 +58,38 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 | `ali_search_judicial` | `province?`, `city?`, `district?`, `page=1`, `fcat_v4_names?`, `fcat_v4_ids?`, `circs?`, `tag_ids?`, `zc_biz_types?` | [Advanced 单源] 仅查阿里；分类可直接传中文名，其余编码来自 `ali_get_filter_options` |
 | `ali_get_supported_areas` | `province?`, `city?` | 列阿里支持的省/市/区县中文名 |
 | `ali_get_filter_options` | (无) | 阿里 9 个 filter 维度的完整可选项 |
+| `ali_pc_browser_start` | (无) | 启动非持久化可见 Chrome；用户手动登录或验证 |
+| `ali_pc_browser_status` | (无) | 检查 PC 会话登录/验证状态 |
+| `ali_pc_search_judicial` | `keyword?`, 分类/地区/资产类型/排序/状态/阶段?, 价格?, 开始日期? | [Interactive Experimental] 阿里 PC 完整筛选；关键词不可与其他筛选混用 |
+| `ali_pc_browser_close` | (无) | 关闭 PC 会话并销毁进程内登录态 |
 | `jd_search_judicial` | `province?`, `city?`, `district?`, `page=1` | [Advanced 单源] 仅查京东 |
 | `jd_get_supported_areas` | `province?`, `city?` | 列京东支持的省/市/区县中文名 |
 
 > 阿里和京东是**两个独立标的池, 不重复**: 阿里偏机构端高价资产 (亿级土地/在建工程), 京东偏散户端住宅/股权/小额债权. 默认调 `search_judicial` 拿双端聚合.
+
+### 阿里 PC 完整筛选
+
+当用户明确要求关键词、价格区间、开始时间、任意状态/阶段等 PC 页面能力时，按以下生命周期调用：
+
+```python
+ali_pc_browser_start()
+# 用户只在弹出的 Chrome 中手动完成登录/验证码；随后检查状态
+ali_pc_browser_status()
+
+ali_pc_search_judicial(
+    category="住宅用房",
+    province="广东",
+    city="江门",
+    max_price_yuan=210000,
+    auction_start_from="2026-08-01",
+    auction_start_to="2026-09-01",
+    status="正在进行",
+)
+
+ali_pc_browser_close()
+```
+
+PC 适配器只使用浏览器进程内会话：不调用 Cookie 读取接口、不导出 `storage_state`、不指定用户数据目录。遇到登录、滑块、二维码或风控页时返回 `action_required`，不会自动绕过。真实页面会在关键词搜索时清空其他筛选，因此 `keyword` 与分类、地区、价格、日期等组合会 fail-closed。
 
 ## 用法示例
 
@@ -109,7 +138,7 @@ search_judicial(province="四川", city="成都市", district="武侯区")
 项目 bundle 了 `gb2260_200712.json` (`cn/gb2260` 200712 快照) 作为阿里查询专用 vintage。命名变更类的区县 (2013 改名导致 legacy 数据集找不到的, 例如绍兴县→柯桥区) 通过 `learn_district_code_from_city` 从城市级 item title 反查动态学码, 学到后写进程缓存。
 
 **行为约定**:
-- 排序固定 价格降序; 状态固定 仅"进行中"+"即将开始" — 都不暴露参数, 产品设计如此
+- 默认 H5/双端聚合排序固定价格降序、状态固定仅"进行中"+"即将开始"；显式 PC 浏览器工具可使用页面提供的其他筛选
 - 公开 MCP 工具对层级缺失或无法解析的地区 fail-closed, 返回结构化错误且 provider 调用为 0
 - `JDH5Client._build_area_params` 底层仍保留 silent skip, 仅作为内部防御, 不代表公开工具会扩大查询范围
 </details>
@@ -119,16 +148,17 @@ search_judicial(province="四川", city="成都市", district="武侯区")
 
 ```
 auction-mcp/
-├── server.py            # FastMCP server, 6 个 @mcp.tool()
+├── server.py            # FastMCP server, 10 个 @mcp.tool()
 ├── ali_h5_client.py     # 阿里 H5 mtop client + 双 vintage 解析 + 守门 + 动态学码
+├── ali_pc_browser_client.py # 非持久化 Chrome PC 完整筛选适配器
 ├── jd_h5_client.py      # 京东 m. 版 client + 全国地区树查询
 ├── gb2260.json          # GB 2260 2020 版 (展示用, 不用于查询)
 ├── gb2260_200712.json   # GB 2260 pre-2013 (阿里 server 实际接受的 vintage)
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
-└── tests/               # 100 项 pytest (含 region boundary / resolve / validation / resilience / live)
+└── tests/               # 115 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
 ```
 
-### 为什么是纯 httpx
+### 为什么默认链路是纯 httpx
 
 v1 想走"app 端真机 sign 桥" — IDA 逆向 + Substrate tweak + SSH 隧道, iPad/Android 两条路都被 anti-tamper SDK (unifiedSign + wua + sgext) 全面挡死。
 
@@ -138,12 +168,14 @@ v2 转向走移动浏览器 H5 mtop:
 - **地区树**: 阿里走国标 GB 2260 (前 2 省 + 中 2 市 + 末 2 区 zero-pad), 但用 pre-2013 vintage; 京东走自家 `getAreaInfoMap` cascade API 一次性抓全国树落本地.
 
 完全 bypass app 端 anti-tamper.
+
+PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默忽略，因此这些能力没有伪装成 H5 参数，而是隔离在显式的非持久化 Playwright 会话中。
 </details>
 
 ## Roadmap
 
 - [ ] **阿里拍品详情** — `queryHttpsItemDetail` mtop 被 baxia 风控拦 (需 `cna + tfstk + isg` cookie). 已规划: 本机 headless Playwright 一次性预热 cookie 注入 httpx, RGV587 时自动重预热.
-- [ ] 暴露更多筛选维度 (价格区间 / 关键词；Ali Advanced 已支持分类中文名及分类/轮次/标签/资产类型编码)
+- [ ] **P2.4 PC 完整筛选交互式 Live 验收** — 适配器、URL/解析/隐私契约与 MCP 工具已实现并通过离线测试；需在用户手动登录会话中验证真实查询结果
 - [x] ~~双端聚合 + 价格单位归一~~ (v2.1, 见 `search_judicial`)
 
 ## License
