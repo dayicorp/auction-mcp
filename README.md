@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-76%20passed%20%7C%2019%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-76%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
@@ -26,7 +26,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **地区参数 fail-closed** — 层级缺失或地区无法解析时, 在请求 Ali/JD provider 前返回结构化错误
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **95 项 pytest 测试** — 76 项离线通过 + 19 项 Live 默认跳过
+- **96 项 pytest 测试** — 76 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -125,7 +125,7 @@ auction-mcp/
 ├── gb2260.json          # GB 2260 2020 版 (展示用, 不用于查询)
 ├── gb2260_200712.json   # GB 2260 pre-2013 (阿里 server 实际接受的 vintage)
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
-└── tests/               # 95 项 pytest (含 region boundary / resolve / validation / resilience / live)
+└── tests/               # 96 项 pytest (含 region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么是纯 httpx
