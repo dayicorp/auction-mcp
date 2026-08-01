@@ -192,6 +192,76 @@ def _validate_ali_pc_resolution(
     return None
 
 
+def _expand_ali_filter_option_value(value: Any) -> list[str]:
+    """把 Ali filter option 的单值或 JSON 数组字符串统一展开为编码列表."""
+    values: list[Any]
+    if isinstance(value, list):
+        values = value
+    elif isinstance(value, str) and value.strip().startswith("["):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = value
+        values = decoded if isinstance(decoded, list) else [decoded]
+    else:
+        values = [value]
+    return [str(item) for item in values if item not in (None, "")]
+
+
+def _resolve_ali_filter_names(
+    var_name: str,
+    names: list[str] | None,
+) -> tuple[list[str] | None, dict | None]:
+    """通过实时 filter options 将 Ali 筛选中文名精确解析为编码，失败时关闭查询."""
+    if not names:
+        return None, None
+
+    nav = ali_get_filter_options()
+    if nav.get("error"):
+        return None, {
+            "error": "ali_filter_options_failed",
+            "diagnostics": {"dimension": var_name, "source": nav},
+        }
+
+    dimension = next(
+        (item for item in nav.get("dimensions", []) if item.get("varName") == var_name),
+        None,
+    )
+    if dimension is None:
+        return None, {
+            "error": "ali_filter_dimension_missing",
+            "diagnostics": {"dimension": var_name},
+        }
+
+    name_to_values: dict[str, list[str]] = {}
+    for option in dimension.get("options", []):
+        name = str(option.get("name") or "").strip()
+        if not name:
+            continue
+        name_to_values.setdefault(name, []).extend(
+            _expand_ali_filter_option_value(option.get("value"))
+        )
+
+    requested = [str(name).strip() for name in names if str(name).strip()]
+    unknown = [name for name in requested if name not in name_to_values]
+    if unknown:
+        return None, {
+            "error": "ali_filter_resolution_failed",
+            "diagnostics": {
+                "dimension": var_name,
+                "unknown_names": unknown,
+                "available_names": list(name_to_values),
+            },
+        }
+
+    resolved: list[str] = []
+    for name in requested:
+        for value in name_to_values[name]:
+            if value not in resolved:
+                resolved.append(value)
+    return resolved, None
+
+
 # ============================================================ tools: 阿里司法拍卖 (H5 mtop)
 
 def _extract_items(raw: dict) -> tuple[list[dict], dict]:
@@ -335,6 +405,7 @@ def ali_search_judicial(
     page: int = 1,
     location_codes: list[str] | None = None,
     fcat_v4_ids: list[str] | None = None,
+    fcat_v4_names: list[str] | None = None,
     circs: list[str] | None = None,
     tag_ids: list[str] | None = None,
     zc_biz_types: list[str] | None = None,
@@ -342,7 +413,7 @@ def ali_search_judicial(
     """**[Advanced 单源]** 阿里司法拍卖搜索. 默认情况下用 `search_judicial` 同时拿两端, 别单独调这个.
 
     仅当用户**明确**要"只查阿里" / 想用 location_codes / fcat_v4_ids /
-    circs / tag_ids / zc_biz_types 等高级参数时才用.
+    fcat_v4_names / circs / tag_ids / zc_biz_types 等高级参数时才用.
 
     **固定 价格降序 + 仅进行中/即将开始** (不可改).
 
@@ -363,6 +434,7 @@ def ali_search_judicial(
         page:     页码 (10 条/页)
         location_codes: (高级, escape hatch) 直接传编码列表; 仍会跑垃圾结果守门
         fcat_v4_ids:    (高级) 分类编码列表, 见 ali_get_filter_options
+        fcat_v4_names:  (高级) 分类中文名列表, 从实时 filter options 精确解析; 不可与 IDs 同传
         circs:          (高级) 拍卖轮次编码列表, 见 ali_get_filter_options
         tag_ids:        (高级) 特性标签编码列表, 见 ali_get_filter_options
         zc_biz_types:   (高级) 资产类型编码列表, 见 ali_get_filter_options 的 zcBizTypes
@@ -381,6 +453,20 @@ def ali_search_judicial(
         _rerr = _validate_ali_pc_resolution(province, city, district)
         if _rerr:
             return _rerr
+
+    # ---------- 分类中文名解析: fail-closed, 不允许与编码混传 ----------
+    if fcat_v4_ids and fcat_v4_names:
+        return {
+            "error": "ali_filter_conflict",
+            "diagnostics": {"dimension": "fcatV4Ids", "fields": ["fcat_v4_ids", "fcat_v4_names"]},
+        }
+    if fcat_v4_names:
+        resolved_fcat_ids, filter_error = _resolve_ali_filter_names(
+            "fcatV4Ids", fcat_v4_names
+        )
+        if filter_error:
+            return filter_error
+        fcat_v4_ids = resolved_fcat_ids
 
     # ---------- 解析 location_codes ----------
     fallback_used = None       # 客户端 title 过滤兜底标志

@@ -191,3 +191,18 @@ def test_ali_advanced_filters_accept_current_live_options():
         )
         assert result.get("validated") is True
         assert isinstance(result.get("items"), list)
+
+    category_options = [
+        option
+        for option in dimensions.get("fcatV4Ids", {}).get("options", [])
+        if option.get("name") and option.get("value") not in (None, "")
+    ]
+    assert category_options, "fcatV4Ids 应至少有一个当前有效分类"
+
+    category_name = str(category_options[0]["name"])
+    category_result = server.ali_search_judicial(fcat_v4_names=[category_name])
+    assert "error" not in category_result, (
+        f"分类中文名 {category_name!r} 应被实时解析并由 Ali API 接受, got: {category_result}"
+    )
+    assert category_result.get("validated") is True
+    assert isinstance(category_result.get("items"), list)

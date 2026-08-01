@@ -366,3 +366,91 @@ def test_ali_client_serializes_circs_and_tag_ids_filters(monkeypatch):
     filters = json.loads(df_variables["context"]["_c_searchlistsf-items"])
     assert filters["circs"] == ["1", "2"]
     assert filters["tagIds"] == ["101"]
+
+
+def test_expand_ali_filter_option_value_handles_json_array_string():
+    """分类 option 可能用 JSON 数组字符串表示多个底层编码."""
+    import server
+
+    assert server._expand_ali_filter_option_value("[206149901,206146502]") == [
+        "206149901", "206146502",
+    ]
+    assert server._expand_ali_filter_option_value("206060601") == ["206060601"]
+
+
+def test_ali_category_names_resolve_and_reach_provider(monkeypatch):
+    """分类中文名应动态解析，数组 option 展开后原样进入主搜索."""
+    import server
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(server, "ali_get_filter_options", lambda: {
+        "dimensions": [{
+            "varName": "fcatV4Ids",
+            "options": [
+                {"name": "住宅用房", "value": "206060601"},
+                {"name": "其他交通工具", "value": "[206149901,206146502]"},
+            ],
+        }],
+    })
+
+    def fake_search_judicial(**kwargs):
+        captured.update(kwargs)
+        return _make_ali_success_response([])
+
+    monkeypatch.setattr(server.ali, "search_judicial", fake_search_judicial)
+
+    result = server.ali_search_judicial(
+        fcat_v4_names=["其他交通工具", "住宅用房"]
+    )
+
+    assert result.get("error") is None
+    assert captured["fcat_v4_ids"] == ["206149901", "206146502", "206060601"]
+
+
+def test_ali_unknown_category_name_fails_before_search(monkeypatch):
+    """未知分类中文名必须 fail-closed，主搜索 provider 调用为 0."""
+    import server
+
+    search_calls = {"count": 0}
+    monkeypatch.setattr(server, "ali_get_filter_options", lambda: {
+        "dimensions": [{
+            "varName": "fcatV4Ids",
+            "options": [{"name": "住宅用房", "value": "206060601"}],
+        }],
+    })
+
+    def fake_search_judicial(**kwargs):
+        search_calls["count"] += 1
+        return _make_ali_success_response([])
+
+    monkeypatch.setattr(server.ali, "search_judicial", fake_search_judicial)
+
+    result = server.ali_search_judicial(fcat_v4_names=["不存在分类"])
+
+    assert result["error"] == "ali_filter_resolution_failed"
+    assert result["diagnostics"]["unknown_names"] == ["不存在分类"]
+    assert search_calls["count"] == 0
+
+
+def test_ali_category_names_and_ids_conflict_without_network(monkeypatch):
+    """分类名称和编码不可混传，filter nav 与主搜索都不应调用."""
+    import server
+
+    calls = {"nav": 0, "search": 0}
+    monkeypatch.setattr(
+        server,
+        "ali_get_filter_options",
+        lambda: calls.update(nav=calls["nav"] + 1),
+    )
+    monkeypatch.setattr(
+        server.ali,
+        "search_judicial",
+        lambda **kwargs: calls.update(search=calls["search"] + 1),
+    )
+
+    result = server.ali_search_judicial(
+        fcat_v4_ids=["206060601"], fcat_v4_names=["住宅用房"]
+    )
+
+    assert result["error"] == "ali_filter_conflict"
+    assert calls == {"nav": 0, "search": 0}
