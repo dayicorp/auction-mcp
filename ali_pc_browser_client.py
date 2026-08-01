@@ -26,6 +26,45 @@ _SELECT_DIMENSION_MARKERS = {
     "price_range": "价格区间",
 }
 _SENSITIVE_QUERY_KEYS = {"x5secdata"}
+_PC_MAX_PAGE = 5
+_PC_CLICKABLE_SELECTOR = 'a,button,[role="button"]'
+_PC_PAGER_SNAPSHOT_SCRIPT = r"""() => {
+    const clickables = Array.from(document.querySelectorAll('a,button,[role="button"]'));
+    const controls = clickables.map((element, index) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        const text = (element.innerText || element.textContent || '')
+            .trim().replace(/\s+/g, ' ');
+        const aria = (element.getAttribute('aria-label') || '').trim();
+        const title = (element.getAttribute('title') || '').trim();
+        const className = String(element.className || '');
+        const id = element.id || '';
+        const haystack = [text, aria, title, className, id].join(' ');
+        return {
+            index,
+            tag: element.tagName.toLowerCase(),
+            text,
+            aria,
+            title,
+            className,
+            id,
+            href: element.href || null,
+            visible: style.display !== 'none' && style.visibility !== 'hidden'
+                && rect.width > 0 && rect.height > 0,
+            disabled: Boolean(element.disabled)
+                || element.getAttribute('aria-disabled') === 'true'
+                || /disabled/i.test(className),
+            relevant: /下一页|下页|next|pagination|pager|page-next|next-next/i.test(haystack),
+        };
+    }).filter(item => item.relevant).slice(0, 30);
+    const current = Array.from(document.querySelectorAll(
+        '[aria-current="page"],.active,.current,.next-current,.ui-page-current'
+    )).map(element => ({
+        text: (element.innerText || element.textContent || '').trim(),
+        className: String(element.className || ''),
+    })).filter(item => /^\d+$/.test(item.text)).slice(0, 10);
+    return {controls, current};
+}"""
 
 
 def _redact_url(url: str | None) -> str | None:
@@ -37,6 +76,56 @@ def _redact_url(url: str | None) -> str | None:
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
     ]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _validate_pc_page(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _PC_MAX_PAGE:
+        raise AliPCBrowserError(
+            "pc_filter_validation_failed",
+            f"page 必须是 1 到 {_PC_MAX_PAGE} 之间的整数",
+        )
+    return value
+
+
+def _pagination_current_page(snapshot: dict[str, Any]) -> int | None:
+    values = {
+        int(str(entry.get("text")))
+        for entry in snapshot.get("current", [])
+        if str(entry.get("text") or "").isdigit()
+    }
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _pagination_next_candidates(
+    snapshot: dict[str, Any],
+    expected_page: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for item in snapshot.get("controls", []):
+        if not item.get("visible") or item.get("disabled"):
+            continue
+        haystack = " ".join(
+            str(item.get(key) or "")
+            for key in ("text", "aria", "title", "className", "id")
+        )
+        is_next = bool(
+            re.search(r"下一页|下页|\bnext\b|page-next|next-next", haystack, re.I)
+        )
+        is_previous = bool(
+            re.search(r"上一页|上页|\bprev\b|previous|page-prev|prev-prev", haystack, re.I)
+        )
+        if not is_next or is_previous:
+            continue
+        href = str(item.get("href") or "")
+        parts = urlsplit(href)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        if (
+            parts.scheme == "https"
+            and parts.hostname == _PC_ALLOWED_HOST
+            and query.get("page") == str(expected_page)
+        ):
+            candidates.append(item)
+    return candidates
 
 
 def _select_dimension(entry: dict) -> str | None:
@@ -872,6 +961,141 @@ class AliPCBrowserClient:
         trace["controlType"] = "link"
         return trace
 
+    async def _pagination_snapshot_unlocked(self) -> dict[str, Any]:
+        assert self._page is not None
+        return await self._page.evaluate(_PC_PAGER_SNAPSHOT_SCRIPT)
+
+    async def _wait_for_page_items_change(
+        self,
+        previous_ids: list[str],
+    ) -> tuple[list[dict], dict]:
+        assert self._page is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_ms / 1000
+        last_items: list[dict] = []
+        diagnostics: dict[str, Any] = {}
+        while True:
+            last_items, diagnostics = await self._wait_for_items(100)
+            current_ids = [
+                str(item.get("itemId"))
+                for item in last_items
+                if item.get("itemId") is not None
+            ]
+            if current_ids and current_ids != previous_ids:
+                return last_items, diagnostics
+            remaining_ms = int((deadline - loop.time()) * 1000)
+            if remaining_ms <= 0:
+                return last_items, diagnostics
+            await self._page.wait_for_timeout(min(500, remaining_ms))
+
+    async def _navigate_to_page(self, target_page: int) -> dict[str, Any]:
+        assert self._page is not None
+        if target_page == 1:
+            return {"page": 1, "pageTurns": 0, "paginationReceipts": []}
+
+        previous_items, previous_diagnostics = await self._wait_for_items(100)
+        previous_ids = [
+            str(item.get("itemId"))
+            for item in previous_items
+            if item.get("itemId") is not None
+        ]
+        if not previous_ids:
+            raise AliPCBrowserError(
+                "pc_pagination_application_failed",
+                "无法在翻页前确认当前页标的集合",
+                {"page": 1, "url": _redact_url(self._page.url), **previous_diagnostics},
+            )
+
+        receipts: list[dict[str, Any]] = []
+        for expected_page in range(2, target_page + 1):
+            snapshot = await self._pagination_snapshot_unlocked()
+            current_page = _pagination_current_page(snapshot)
+            if current_page != expected_page - 1:
+                raise AliPCBrowserError(
+                    "pc_pagination_resolution_failed",
+                    "当前页码指示与预期不一致，拒绝继续翻页",
+                    {
+                        "expected_current_page": expected_page - 1,
+                        "actual_current_page": current_page,
+                        "url": _redact_url(self._page.url),
+                    },
+                )
+            candidates = _pagination_next_candidates(snapshot, expected_page)
+            if len(candidates) != 1:
+                raise AliPCBrowserError(
+                    "pc_pagination_resolution_failed",
+                    "无法唯一解析指向预期页码的下一页控件",
+                    {
+                        "expected_page": expected_page,
+                        "match_count": len(candidates),
+                        "url": _redact_url(self._page.url),
+                    },
+                )
+
+            candidate = candidates[0]
+            await self._page.locator(_PC_CLICKABLE_SELECTOR).nth(candidate["index"]).click()
+            try:
+                await self._page.wait_for_load_state(
+                    "domcontentloaded", timeout=self.timeout_ms
+                )
+            except Exception:
+                pass
+            await self._page.wait_for_timeout(1500)
+
+            title = await self._page.title()
+            body = await self._page.locator("body").inner_text(timeout=self.timeout_ms)
+            action = self._action_required(self._page.url, title, body)
+            if action:
+                return {"action_required": action}
+
+            current_items, parse_diagnostics = await self._wait_for_page_items_change(
+                previous_ids
+            )
+            current_ids = [
+                str(item.get("itemId"))
+                for item in current_items
+                if item.get("itemId") is not None
+            ]
+            current_snapshot = await self._pagination_snapshot_unlocked()
+            confirmed_page = _pagination_current_page(current_snapshot)
+            if confirmed_page != expected_page or not current_ids or current_ids == previous_ids:
+                raise AliPCBrowserError(
+                    "pc_pagination_application_failed",
+                    "页面未同时确认页码递增和标的集合变化",
+                    {
+                        "expected_page": expected_page,
+                        "actual_page": confirmed_page,
+                        "previous_count": len(previous_ids),
+                        "current_count": len(current_ids),
+                        "page_sets_differ": current_ids != previous_ids,
+                        "url": _redact_url(self._page.url),
+                        **parse_diagnostics,
+                    },
+                )
+
+            overlap = sorted(set(previous_ids) & set(current_ids))
+            receipts.append({
+                "fromPage": expected_page - 1,
+                "toPage": expected_page,
+                "url": _redact_url(self._page.url),
+                "previousCount": len(previous_ids),
+                "currentCount": len(current_ids),
+                "overlapCount": len(overlap),
+                "newItemCount": len(set(current_ids) - set(previous_ids)),
+                "control": {
+                    "tag": candidate.get("tag"),
+                    "className": candidate.get("className"),
+                    "href": _redact_url(candidate.get("href")),
+                },
+            })
+            previous_ids = current_ids
+
+        return {
+            "page": target_page,
+            "pageTurns": target_page - 1,
+            "paginationReceipts": receipts,
+        }
+
     async def _wait_for_items(self, limit: int) -> tuple[list[dict], dict]:
         """轮询等待旧 PC 页面异步渲染拍品卡片，避免 DOMContentLoaded 过早解析."""
         assert self._page is not None
@@ -936,6 +1160,7 @@ class AliPCBrowserClient:
         max_price_yuan: int | float | str | None = None,
         auction_start_from: str | None = None,
         auction_start_to: str | None = None,
+        page: int = 1,
         limit: int = 20,
     ) -> dict:
         lock = await self._locked()
@@ -952,6 +1177,10 @@ class AliPCBrowserClient:
                 return AliPCBrowserError(
                     "pc_filter_validation_failed", "limit 必须在 1 到 100 之间"
                 ).as_dict()
+            try:
+                target_page = _validate_pc_page(page)
+            except AliPCBrowserError as exc:
+                return exc.as_dict()
 
             scoped = any((category, province, city, district, asset_type, sort, status, stage))
             try:
@@ -1021,6 +1250,9 @@ class AliPCBrowserClient:
                 action = self._action_required(self._page.url, title, body)
                 if action:
                     return action
+                pagination = await self._navigate_to_page(target_page)
+                if pagination.get("action_required"):
+                    return pagination["action_required"]
                 items, parse_diagnostics = await self._wait_for_items(limit)
                 if not items:
                     final_body = await self._page.locator("body").inner_text(timeout=self.timeout_ms)
@@ -1045,8 +1277,11 @@ class AliPCBrowserClient:
                     "items": items,
                     "url": self._page.url,
                     "appliedFilters": applied_filters,
+                    **pagination,
                     "authenticated_session": True,
                     "cookie_policy": "browser_memory_only",
+                    "cookie_exported": False,
+                    "cookie_persisted_by_adapter": False,
                 }
             except AliPCBrowserError as exc:
                 return exc.as_dict()

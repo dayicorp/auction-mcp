@@ -10,6 +10,9 @@ import pytest
 
 from ali_pc_browser_client import (
     _redact_url,
+    _pagination_current_page,
+    _pagination_next_candidates,
+    _validate_pc_page,
     AliPCBrowserClient,
     AliPCBrowserError,
     build_pc_search_url,
@@ -17,6 +20,54 @@ from ali_pc_browser_client import (
     evaluate_pc_matrix_scenario,
     parse_pc_item_records,
 )
+
+
+@pytest.mark.parametrize("value", [0, 6, -1, True, 1.5, "2"])
+def test_pc_page_validation_rejects_out_of_contract_values(value):
+    with pytest.raises(AliPCBrowserError) as exc_info:
+        _validate_pc_page(value)
+
+    assert exc_info.value.code == "pc_filter_validation_failed"
+
+
+def test_pc_page_validation_accepts_bounded_integer():
+    assert _validate_pc_page(1) == 1
+    assert _validate_pc_page(5) == 5
+
+
+def test_pc_pagination_contract_requires_unique_same_site_expected_page_link():
+    snapshot = {
+        "current": [{"text": "1", "className": "current"}],
+        "controls": [
+            {
+                "index": 1,
+                "text": "",
+                "className": "next",
+                "href": "https://sf.taobao.com/list/example.htm?page=2",
+                "visible": True,
+                "disabled": False,
+            },
+            {
+                "index": 2,
+                "text": "下一页",
+                "className": "next",
+                "href": "https://example.com/list?page=2",
+                "visible": True,
+                "disabled": False,
+            },
+            {
+                "index": 3,
+                "text": "下一页",
+                "className": "next",
+                "href": "https://sf.taobao.com/list/example.htm?page=3",
+                "visible": True,
+                "disabled": False,
+            },
+        ],
+    }
+
+    assert _pagination_current_page(snapshot) == 1
+    assert _pagination_next_candidates(snapshot, 2) == [snapshot["controls"][0]]
 
 
 def test_pc_keyword_url_uses_verified_utf8_protocol():
@@ -243,6 +294,115 @@ def test_pc_wait_for_items_polls_until_dynamic_cards_render():
     assert items[0]["currentPriceYuan"] == pytest.approx(100_360)
     assert diagnostics == {"poll_attempts": 2, "candidate_record_count": 1}
     assert client._page.waits == [500]
+
+
+def test_pc_navigate_to_page_confirms_indicator_and_changed_item_set():
+    class BodyLocator:
+        async def inner_text(self, timeout=None):
+            return "司法拍卖列表 当前价"
+
+    class NextLocator:
+        def __init__(self, page):
+            self.page = page
+
+        def nth(self, index):
+            assert index == 0
+            return self
+
+        async def click(self):
+            self.page.current_page = 2
+            self.page.url = "https://sf.taobao.com/list/example.htm?page=2"
+
+    class FakePage:
+        url = "https://sf.taobao.com/list/example.htm"
+        current_page = 1
+
+        async def evaluate(self, script):
+            return {
+                "current": [{"text": str(self.current_page), "className": "current"}],
+                "controls": [{
+                    "index": 0,
+                    "tag": "a",
+                    "text": "",
+                    "className": "next",
+                    "href": f"https://sf.taobao.com/list/example.htm?page={self.current_page + 1}",
+                    "visible": True,
+                    "disabled": False,
+                }],
+            }
+
+        def locator(self, selector):
+            return BodyLocator() if selector == "body" else NextLocator(self)
+
+        async def wait_for_load_state(self, state, timeout):
+            return None
+
+        async def wait_for_timeout(self, milliseconds):
+            return None
+
+        async def title(self):
+            return "司法拍卖列表"
+
+    class FakeClient(AliPCBrowserClient):
+        async def _wait_for_items(self, limit):
+            ids = ["1", "2"] if self._page.current_page == 1 else ["2", "3", "4"]
+            return ([{"itemId": item_id} for item_id in ids], {"poll_attempts": 1})
+
+        async def _wait_for_page_items_change(self, previous_ids):
+            assert previous_ids == ["1", "2"]
+            return ([{"itemId": "2"}, {"itemId": "3"}, {"itemId": "4"}], {"poll_attempts": 1})
+
+    client = FakeClient()
+    client._page = FakePage()
+
+    receipt = asyncio.run(client._navigate_to_page(2))
+
+    assert receipt["page"] == 2
+    assert receipt["pageTurns"] == 1
+    assert receipt["paginationReceipts"] == [{
+        "fromPage": 1,
+        "toPage": 2,
+        "url": "https://sf.taobao.com/list/example.htm?page=2",
+        "previousCount": 2,
+        "currentCount": 3,
+        "overlapCount": 1,
+        "newItemCount": 2,
+        "control": {
+            "tag": "a",
+            "className": "next",
+            "href": "https://sf.taobao.com/list/example.htm?page=2",
+        },
+    }]
+
+
+def test_pc_navigate_to_page_fails_closed_when_current_indicator_is_missing():
+    class FakePage:
+        url = "https://sf.taobao.com/list/example.htm"
+
+        async def evaluate(self, script):
+            return {
+                "current": [],
+                "controls": [{
+                    "index": 0,
+                    "text": "下一页",
+                    "className": "next",
+                    "href": "https://sf.taobao.com/list/example.htm?page=2",
+                    "visible": True,
+                    "disabled": False,
+                }],
+            }
+
+    class FakeClient(AliPCBrowserClient):
+        async def _wait_for_items(self, limit):
+            return ([{"itemId": "1"}], {})
+
+    client = FakeClient()
+    client._page = FakePage()
+
+    with pytest.raises(AliPCBrowserError) as exc_info:
+        asyncio.run(client._navigate_to_page(2))
+
+    assert exc_info.value.code == "pc_pagination_resolution_failed"
 
 
 def test_pc_filter_snapshot_reads_dynamic_links_selects_and_inputs():
@@ -480,6 +640,62 @@ def test_pc_search_requires_started_browser():
     client = AliPCBrowserClient()
     result = asyncio.run(client.search(keyword="住宅"))
     assert result["error"] == "pc_browser_not_started"
+
+
+def test_pc_search_wires_page_to_verified_pagination_navigation():
+    class BodyLocator:
+        async def inner_text(self, timeout=None):
+            return "司法拍卖列表 当前价"
+
+    class FakePage:
+        url = "https://sf.taobao.com/"
+
+        def is_closed(self):
+            return False
+
+        async def goto(self, url, wait_until=None):
+            self.url = url
+
+        async def title(self):
+            return "司法拍卖列表"
+
+        def locator(self, selector):
+            assert selector == "body"
+            return BodyLocator()
+
+    class FakeClient(AliPCBrowserClient):
+        requested_page = None
+
+        async def _status_unlocked(self):
+            return {"state": "ready", "authenticated": True}
+
+        async def _navigate_to_page(self, target_page):
+            self.requested_page = target_page
+            self._page.url = "https://sf.taobao.com/list/example.htm?page=2"
+            return {
+                "page": target_page,
+                "pageTurns": 1,
+                "paginationReceipts": [{"fromPage": 1, "toPage": 2}],
+            }
+
+        async def _wait_for_items(self, limit):
+            return ([{
+                "itemId": "2",
+                "title": "第二页住宅",
+                "currentPriceYuan": 100_000,
+                "url": "https://sf-item.taobao.com/sf_item/2.htm",
+            }], {"poll_attempts": 1})
+
+    client = FakeClient()
+    client._page = FakePage()
+
+    result = asyncio.run(client.search(page=2, limit=10))
+
+    assert client.requested_page == 2
+    assert result["page"] == 2
+    assert result["pageTurns"] == 1
+    assert result["count"] == 1
+    assert result["paginationReceipts"] == [{"fromPage": 1, "toPage": 2}]
 
 
 def test_pc_search_requires_authenticated_session():

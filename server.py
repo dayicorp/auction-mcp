@@ -663,6 +663,7 @@ async def ali_pc_search_judicial(
     max_price_yuan: int | None = None,
     auction_start_from: str | None = None,
     auction_start_to: str | None = None,
+    page: int = 1,
     limit: int = 20,
 ) -> dict:
     """**[Interactive Experimental]** 通过登录态 PC 页面执行阿里司法拍卖完整筛选.
@@ -681,6 +682,8 @@ async def ali_pc_search_judicial(
         stage: 拍卖阶段中文名，如“一拍”“二拍”“重新拍卖”“变卖”。
         min_price_yuan/max_price_yuan: 价格下限/上限，单位为整数人民币元。
         auction_start_from/auction_start_to: 开始日期范围，YYYY-MM-DD，必须同时提供。
+        page: 页码，1-5。page>1 时逐次点击真实唯一“下一页”控件，
+              每次同时核验页码递增和标的集合变化。
         limit: 最多返回当前页面识别出的拍品数，1-100。
 
     Returns:
@@ -702,6 +705,7 @@ async def ali_pc_search_judicial(
         max_price_yuan=max_price_yuan,
         auction_start_from=auction_start_from,
         auction_start_to=auction_start_to,
+        page=page,
         limit=limit,
     )
 

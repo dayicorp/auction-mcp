@@ -7,6 +7,7 @@ from scripts.manual_live_pc_pagination import (
     _safe_candidate,
     _wait_for_manual_close,
 )
+from scripts.manual_live_pc_page2 import evaluate_page2_acceptance
 
 
 def test_choose_next_candidate_ignores_previous_hidden_and_disabled_controls():
@@ -125,3 +126,47 @@ def test_manual_close_requires_explicit_close_word(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     _wait_for_manual_close()
+
+
+def test_page2_acceptance_requires_verified_page_receipt_and_filters():
+    report = evaluate_page2_acceptance({
+        "source": "ali_pc_browser",
+        "authenticated_session": True,
+        "count": 2,
+        "items": [{"itemId": "2"}, {"itemId": "3"}],
+        "url": "https://sf.taobao.com/list/example.htm?page=2",
+        "page": 2,
+        "pageTurns": 1,
+        "paginationReceipts": [{"fromPage": 1, "toPage": 2}],
+        "appliedFilters": [
+            {"dimension": "category", "label": "住宅用房"},
+            {"dimension": "province", "label": "广东"},
+            {"dimension": "city", "label": "江门"},
+        ],
+        "cookie_exported": False,
+        "cookie_persisted_by_adapter": False,
+    })
+
+    assert report["accepted"] is True
+    assert report["failures"] == []
+    assert report["evidence"]["query_page"] == "2"
+
+
+def test_page2_acceptance_rejects_unverified_page_or_duplicate_items():
+    report = evaluate_page2_acceptance({
+        "source": "ali_pc_browser",
+        "authenticated_session": True,
+        "count": 2,
+        "items": [{"itemId": "2"}, {"itemId": "2"}],
+        "url": "https://sf.taobao.com/list/example.htm",
+        "page": 1,
+        "pageTurns": 0,
+        "paginationReceipts": [],
+        "appliedFilters": [],
+    })
+
+    assert report["accepted"] is False
+    assert "page_not_confirmed" in report["failures"]
+    assert "page_query_param_mismatch" in report["failures"]
+    assert "duplicate_items_within_page" in report["failures"]
+    assert "applied_filter_mismatch" in report["failures"]
