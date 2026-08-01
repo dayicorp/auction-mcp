@@ -85,11 +85,32 @@ _PC_DETAIL_SNAPSHOT_SCRIPT = r"""() => {
         '延时周期', '竞价周期', '联系方式', '标的公告'
     ];
     const labelBlocks = {};
+    const labelCandidates = {};
+    const digitRequired = new Set([
+        '当前价', '变卖价', '起拍价', '评估价', '保证金', '加价幅度',
+        '延时周期', '竞价周期'
+    ]);
     for (const label of labels) {
         const matches = candidates.filter(text => text.includes(label))
-            .sort((left, right) => left.length - right.length);
+            .map(text => {
+                const suffix = text.split(label).slice(1).join(label)
+                    .replace(/^[:：\s¥￥]+/, '');
+                const hasDigit = /\d/.test(suffix);
+                const hasMeaning = suffix.replace(/[:：\s¥￥元\d.,，]/g, '').length > 0;
+                const useful = digitRequired.has(label) ? hasDigit : (hasDigit || hasMeaning);
+                return {text, useful};
+            })
+            .sort((left, right) => Number(right.useful) - Number(left.useful)
+                || left.text.length - right.text.length)
+            .map(item => item.text);
+        labelCandidates[label] = matches.slice(0, 12);
         labelBlocks[label] = matches.length ? matches[0] : null;
     }
+    const statusLabels = ['正在进行', '即将开始', '已结束', '中止', '撤回'];
+    const stageLabels = ['重新拍卖', '二拍', '一拍', '变卖'];
+    const exactOrBody = labelsToFind => labelsToFind.find(label =>
+        candidates.some(text => text === label) || bodyText.includes(label)
+    ) || null;
     const titleNode = Array.from(document.querySelectorAll('h1'))
         .find(element => visible(element) && clean(element.innerText));
     const detailNode = document.querySelector('#J_ItemDetailContent');
@@ -119,6 +140,9 @@ _PC_DETAIL_SNAPSHOT_SCRIPT = r"""() => {
         title: titleNode ? clean(titleNode.innerText || titleNode.textContent) : '',
         bodyText,
         labelBlocks,
+        labelCandidates,
+        statusText: exactOrBody(statusLabels),
+        stageText: exactOrBody(stageLabels),
         detailPresent: Boolean(detailNode),
         detailText,
         detailLoading: detailText.includes('标的物详情加载中'),
@@ -190,16 +214,84 @@ def _pc_detail_url_matches(url: str, item_id: str) -> bool:
 def _yuan_from_text(text: str | None, label: str) -> int | float | None:
     if not text or label not in text:
         return None
-    segment = text.split(label, 1)[1]
-    match = re.search(r"[:：\s¥￥]*([0-9][0-9,]*(?:\.\d+)?)\s*(万|亿)?", segment)
-    if not match:
-        return None
-    amount = Decimal(match.group(1).replace(",", ""))
-    multiplier = {None: Decimal(1), "万": Decimal(10_000), "亿": Decimal(100_000_000)}[
-        match.group(2)
+    for segment in text.split(label)[1:]:
+        match = re.match(
+            r"[:：\s¥￥]{0,12}([0-9][0-9,]*(?:\.\d+)?)\s*(万|亿)?",
+            segment,
+        )
+        if not match:
+            continue
+        amount = Decimal(match.group(1).replace(",", ""))
+        multiplier = {
+            None: Decimal(1),
+            "万": Decimal(10_000),
+            "亿": Decimal(100_000_000),
+        }[match.group(2)]
+        value = amount * multiplier
+        return int(value) if value == value.to_integral_value() else float(value)
+    return None
+
+
+def _detail_text_candidates(snapshot: dict[str, Any], label: str) -> list[str]:
+    candidates = [
+        str(value)
+        for value in (snapshot.get("labelCandidates") or {}).get(label, [])
+        if value
     ]
-    value = amount * multiplier
-    return int(value) if value == value.to_integral_value() else float(value)
+    block = (snapshot.get("labelBlocks") or {}).get(label)
+    if block:
+        candidates.append(str(block))
+    candidates.extend(
+        str(value)
+        for value in (snapshot.get("bodyText"), snapshot.get("detailText"))
+        if value
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def _detail_amount(snapshot: dict[str, Any], label: str) -> int | float | None:
+    aliases = {
+        "评估价": ("标的询价平均值",),
+    }.get(label, ())
+    for text in _detail_text_candidates(snapshot, label):
+        for candidate_label in (label, *aliases):
+            value = _yuan_from_text(text, candidate_label)
+            if value is not None:
+                return value
+    return None
+
+
+def _detail_period(snapshot: dict[str, Any], label: str) -> str | None:
+    for text in _detail_text_candidates(snapshot, label):
+        for segment in text.split(label)[1:]:
+            match = re.match(
+                r"[:：\s]{0,12}([0-9]+(?:\.\d+)?\s*(?:天|小时|分钟|秒))",
+                segment,
+            )
+            if match:
+                return re.sub(r"\s+", "", match.group(1))
+    return None
+
+
+def _detail_status(snapshot: dict[str, Any], page_title: str = "") -> str | None:
+    combined = " ".join(
+        str(value)
+        for value in (
+            snapshot.get("statusText"),
+            snapshot.get("bodyText"),
+            snapshot.get("title"),
+            page_title,
+        )
+        if value
+    )
+    return next(
+        (
+            candidate
+            for candidate in ("正在进行", "即将开始", "已结束", "中止", "撤回")
+            if candidate in combined
+        ),
+        None,
+    )
 
 
 def _normalize_pc_detail_snapshot(
@@ -211,14 +303,9 @@ def _normalize_pc_detail_snapshot(
 ) -> dict[str, Any]:
     body = str(snapshot.get("bodyText") or "")
     detail_text = str(snapshot.get("detailText") or "")
-    label_blocks = snapshot.get("labelBlocks") or {}
-
-    def amount(label: str) -> int | float | None:
-        return _yuan_from_text(label_blocks.get(label), label)
-
-    current_price = amount("当前价")
+    current_price = _detail_amount(snapshot, "当前价")
     if current_price is None:
-        current_price = amount("变卖价")
+        current_price = _detail_amount(snapshot, "变卖价")
     counts = {
         "registrationCount": None,
         "reminderCount": None,
@@ -235,17 +322,38 @@ def _normalize_pc_detail_snapshot(
 
     start_match = re.search(r"(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2})(?:[^\d]|$)", body)
     court_match = re.search(r"([\u4e00-\u9fff]{2,30}(?:人民法院|法院))", body)
-    phone_match = re.search(r"(?<!\d)(1[3-9]\d{9})(?!\d)", body)
-    contact_block = str(label_blocks.get("联系方式") or "")
-    contact_match = re.search(r"联系方式\s*[:：]?\s*([^\s，,；;]+)", contact_block)
+    contact_sources = [
+        str(value)
+        for value in (snapshot.get("labelCandidates") or {}).get("联系方式", [])
+        if value
+    ]
+    contact_block = (snapshot.get("labelBlocks") or {}).get("联系方式")
+    if contact_block:
+        contact_sources.append(str(contact_block))
+    contact_sources = list(dict.fromkeys(contact_sources))
+    contact_text = " ".join(contact_sources)
+    phone_match = re.search(r"(?<!\d)(1[3-9]\d{9})(?!\d)", contact_text)
+    contact_match = re.search(
+        r"联系方式\s*[:：]?\s*([\u4e00-\u9fff]{1,12})"
+        r"(?=\s|联系电话|手机|电话|联系|$)",
+        contact_text,
+    )
+    contact_name = contact_match.group(1) if contact_match else None
+    if contact_name in {"手机", "电话", "联系电话", "联系"}:
+        contact_name = None
     location_match = re.search(r"标的物位置\s*([^。；;]+)", detail_text)
-    status = next(
-        (candidate for candidate in ("正在进行", "即将开始", "已结束", "中止", "撤回")
-         if candidate in body),
-        None,
+    status = _detail_status(snapshot, page_title)
+    stage_source = " ".join(
+        str(value)
+        for value in (snapshot.get("stageText"), body, snapshot.get("title"), page_title)
+        if value
     )
     stage = next(
-        (candidate for candidate in ("重新拍卖", "二拍", "一拍", "变卖") if candidate in body),
+        (
+            candidate
+            for candidate in ("重新拍卖", "二拍", "一拍", "变卖")
+            if candidate in stage_source
+        ),
         None,
     )
     attachments = [
@@ -265,16 +373,16 @@ def _normalize_pc_detail_snapshot(
         "stage": stage,
         "auctionStartAt": start_match.group(1) if start_match else None,
         "currentPriceYuan": current_price,
-        "startingPriceYuan": amount("起拍价"),
-        "appraisalPriceYuan": amount("评估价"),
-        "depositYuan": amount("保证金"),
-        "incrementYuan": amount("加价幅度"),
+        "startingPriceYuan": _detail_amount(snapshot, "起拍价"),
+        "appraisalPriceYuan": _detail_amount(snapshot, "评估价"),
+        "depositYuan": _detail_amount(snapshot, "保证金"),
+        "incrementYuan": _detail_amount(snapshot, "加价幅度"),
         **counts,
-        "delayPeriod": label_blocks.get("延时周期"),
-        "biddingPeriod": label_blocks.get("竞价周期"),
+        "delayPeriod": _detail_period(snapshot, "延时周期"),
+        "biddingPeriod": _detail_period(snapshot, "竞价周期"),
         "court": court_match.group(1) if court_match else None,
         "contact": {
-            "name": contact_match.group(1) if contact_match else None,
+            "name": contact_name,
             "phone": phone_match.group(1) if phone_match else None,
         },
         "announcementUrl": _redact_url(snapshot.get("announcementUrl")),
@@ -1370,10 +1478,14 @@ class AliPCBrowserClient:
             if action:
                 return {"action_required": action}, {"poll_attempts": attempts}
 
-            label_blocks = last_snapshot.get("labelBlocks") or {}
             price_ready = any(
-                label_blocks.get(label)
+                _detail_amount(last_snapshot, label) is not None
                 for label in ("当前价", "变卖价", "起拍价", "保证金", "评估价")
+            )
+            status_ready = _detail_status(last_snapshot, title) is not None
+            periods_ready = all(
+                _detail_period(last_snapshot, label) is not None
+                for label in ("延时周期", "竞价周期")
             )
             detail_ready = (
                 bool(last_snapshot.get("detailPresent"))
@@ -1394,10 +1506,19 @@ class AliPCBrowserClient:
             detail_ready = detail_ready and not loading_markers_present
             attachment_ready = attachment_ready and not loading_markers_present
             url_ready = _pc_detail_url_matches(self._page.url, item_id)
-            if price_ready and detail_ready and attachment_ready and url_ready:
+            if (
+                price_ready
+                and status_ready
+                and periods_ready
+                and detail_ready
+                and attachment_ready
+                and url_ready
+            ):
                 return last_snapshot, {
                     "poll_attempts": attempts,
                     "price_ready": True,
+                    "status_ready": True,
+                    "periods_ready": True,
                     "detail_ready": True,
                     "attachment_ready": True,
                     "url_ready": True,
@@ -1408,6 +1529,8 @@ class AliPCBrowserClient:
                 return last_snapshot, {
                     "poll_attempts": attempts,
                     "price_ready": price_ready,
+                    "status_ready": status_ready,
+                    "periods_ready": periods_ready,
                     "detail_ready": detail_ready,
                     "attachment_ready": attachment_ready,
                     "url_ready": url_ready,
@@ -1456,6 +1579,8 @@ class AliPCBrowserClient:
                     diagnostics.get(key)
                     for key in (
                         "price_ready",
+                        "status_ready",
+                        "periods_ready",
                         "detail_ready",
                         "attachment_ready",
                         "url_ready",

@@ -11,6 +11,9 @@ import pytest
 SYNTHETIC_TEST_PHONE = "138" + "0000" + "0000"
 
 from ali_pc_browser_client import (
+    _detail_amount,
+    _detail_period,
+    _detail_status,
     _normalize_pc_detail_snapshot,
     _pagination_current_page,
     _pagination_next_candidates,
@@ -18,6 +21,7 @@ from ali_pc_browser_client import (
     _redact_url,
     _validate_pc_item_id,
     _validate_pc_page,
+    _yuan_from_text,
     AliPCBrowserClient,
     AliPCBrowserError,
     build_pc_detail_url,
@@ -117,6 +121,8 @@ def test_pc_detail_snapshot_normalizes_verified_schema_and_redacts_risk_tokens()
     assert detail["appraisalPriceYuan"] == 471_680
     assert detail["depositYuan"] == 33_018
     assert detail["incrementYuan"] == 3_000
+    assert detail["delayPeriod"] == "5分钟"
+    assert detail["biddingPeriod"] == "1天"
     assert detail["registrationCount"] == 0
     assert detail["reminderCount"] == 27
     assert detail["viewCount"] == 940
@@ -126,6 +132,83 @@ def test_pc_detail_snapshot_normalizes_verified_schema_and_redacts_risk_tokens()
     assert "secret" not in detail["announcementUrl"]
     assert "secret" not in detail["attachments"][0]["url"]
     assert detail["images"] == ["https://img.alicdn.com/a.jpg?x5secdata=REDACTED"]
+
+
+def test_pc_detail_amount_skips_bare_label_before_valued_candidate():
+    text = "起拍价 起拍价：¥330,176元 评估价：¥471,680元"
+    assert _yuan_from_text(text, "起拍价") == 330_176
+
+
+def test_pc_detail_live_regression_prefers_candidates_with_actual_values():
+    snapshot = _ready_detail_snapshot()
+    snapshot.update({
+        "title": "一拍 江门市蓬江区泰和广场11号之三402室",
+        "statusText": "即将开始",
+        "stageText": "一拍",
+        "bodyText": (
+            "一拍 2026-08-06 10:00开拍 0人报名 27人设置提醒 941次围观 "
+            "江门市蓬江区人民法院"
+        ),
+        "labelBlocks": {
+            "当前价": "当前价",
+            "变卖价": "变卖价",
+            "起拍价": "起拍价",
+            "评估价": "评估价",
+            "保证金": "保证金",
+            "加价幅度": "加价幅度",
+            "延时周期": "延时周期",
+            "竞价周期": "竞价周期",
+            "联系方式": "联系方式：",
+            "标的公告": "标的公告",
+        },
+        "labelCandidates": {
+            "起拍价": ["起拍价", "起拍价：¥330,176元"],
+            "评估价": ["评估价"],
+            "保证金": ["保证金", "保证金：¥33,018元"],
+            "加价幅度": ["加价幅度", "加价幅度：¥3,000元"],
+            "延时周期": ["延时周期", "延时周期：5分钟"],
+            "竞价周期": ["竞价周期", "竞价周期：1天"],
+            "联系方式": ["联系方式：", "联系方式：陈生 联系"],
+        },
+        "detailText": (
+            "标的物估值 标的询价平均值 471680.00元 标的物位置 "
+            "广东省 江门市 蓬江区泰和广场11号之三402室。"
+        ),
+    })
+
+    detail = _normalize_pc_detail_snapshot(
+        snapshot,
+        item_id="1062507630078",
+        url="https://sf-item.taobao.com/sf_item/1062507630078.htm",
+        page_title="司法拍卖详情",
+    )
+
+    assert _detail_amount(snapshot, "起拍价") == 330_176
+    assert _detail_period(snapshot, "延时周期") == "5分钟"
+    assert _detail_status(snapshot) == "即将开始"
+    assert detail["startingPriceYuan"] == 330_176
+    assert detail["appraisalPriceYuan"] == 471_680
+    assert detail["depositYuan"] == 33_018
+    assert detail["incrementYuan"] == 3_000
+    assert detail["delayPeriod"] == "5分钟"
+    assert detail["biddingPeriod"] == "1天"
+    assert detail["contact"] == {"name": "陈生", "phone": None}
+    assert detail["status"] == "即将开始"
+
+
+def test_pc_detail_contact_bare_label_returns_null_instead_of_punctuation():
+    snapshot = _ready_detail_snapshot()
+    snapshot["labelBlocks"]["联系方式"] = "联系方式："
+    snapshot["labelCandidates"] = {"联系方式": ["联系方式："]}
+
+    detail = _normalize_pc_detail_snapshot(
+        snapshot,
+        item_id="1062507630078",
+        url="https://sf-item.taobao.com/sf_item/1062507630078.htm",
+        page_title="司法拍卖详情",
+    )
+
+    assert detail["contact"] == {"name": None, "phone": None}
 
 
 @pytest.mark.parametrize("value", [0, 6, -1, True, 1.5, "2"])
@@ -792,11 +875,44 @@ def test_pc_detail_waits_until_body_and_attachments_finish_loading():
     assert diagnostics == {
         "poll_attempts": 2,
         "price_ready": True,
+        "status_ready": True,
+        "periods_ready": True,
         "detail_ready": True,
         "attachment_ready": True,
         "url_ready": True,
     }
     assert len(client._page.waits) == 1
+
+
+def test_pc_detail_ready_gate_rejects_bare_labels_without_values():
+    snapshot = _ready_detail_snapshot()
+    snapshot["labelBlocks"] = {
+        label: label
+        for label in snapshot["labelBlocks"]
+    }
+    snapshot["labelCandidates"] = {}
+
+    class FakePage:
+        url = "https://sf-item.taobao.com/sf_item/1062507630078.htm"
+
+        async def evaluate(self, script):
+            return snapshot
+
+        async def title(self):
+            return "江门住宅详情"
+
+        async def wait_for_timeout(self, timeout):
+            raise AssertionError("零超时门禁不应继续等待")
+
+    client = AliPCBrowserClient(timeout_ms=0)
+    client._page = FakePage()
+    _, diagnostics = asyncio.run(
+        client._wait_for_detail_snapshot("1062507630078")
+    )
+
+    assert diagnostics["price_ready"] is False
+    assert diagnostics["periods_ready"] is False
+    assert diagnostics["status_ready"] is True
 
 
 def test_pc_detail_query_returns_structured_ready_snapshot_without_cookie_state():
@@ -832,6 +948,8 @@ def test_pc_detail_query_returns_structured_ready_snapshot_without_cookie_state(
             return _ready_detail_snapshot(), {
                 "poll_attempts": 2,
                 "price_ready": True,
+                "status_ready": True,
+                "periods_ready": True,
                 "detail_ready": True,
                 "attachment_ready": True,
                 "url_ready": True,
@@ -910,6 +1028,8 @@ def test_pc_detail_query_fails_closed_while_async_content_is_incomplete():
             return _ready_detail_snapshot(), {
                 "poll_attempts": 3,
                 "price_ready": True,
+                "status_ready": True,
+                "periods_ready": True,
                 "detail_ready": False,
                 "attachment_ready": False,
                 "url_ready": True,
