@@ -332,11 +332,12 @@ def evaluate_pc_matrix_scenario(
     if not items:
         failures.append("no_items")
 
-    applied_entries = (
-        result.get("appliedFilters")
-        if isinstance(result.get("appliedFilters"), list)
-        else []
-    )
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    applied_entries = result.get("appliedFilters")
+    if not isinstance(applied_entries, list):
+        applied_entries = diagnostics.get("appliedFilters", [])
+    if not isinstance(applied_entries, list):
+        applied_entries = []
     applied = {
         str(entry.get("dimension")): str(entry.get("label"))
         for entry in applied_entries
@@ -350,7 +351,6 @@ def evaluate_pc_matrix_scenario(
     if mismatches:
         failures.append("applied_filter_mismatch")
 
-    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     return {
         "name": name,
         "accepted": not failures,
@@ -358,6 +358,9 @@ def evaluate_pc_matrix_scenario(
         "evidence": {
             "count": len(items),
             "reported_count": result.get("count"),
+            "error": result.get("error"),
+            "error_message": result.get("message"),
+            "diagnostics": diagnostics,
             "url": result.get("url") or diagnostics.get("url"),
             "expected_filters": expected_filters,
             "applied_filters": applied,
@@ -750,30 +753,37 @@ class AliPCBrowserClient:
                 {"dimension": dimension, "name": label, "select_id": select_id},
             )
         await self._page.wait_for_timeout(200)
-        clicked = await self._page.evaluate(
-            """({selectId, wanted}) => {
-                const select = document.getElementById(selectId);
-                const root = select && (select.closest('li.block') || select.parentElement);
-                const dropdown = root && root.querySelector('.bf-select-dropdown');
-                if (!dropdown) return {matchCount: 0};
-                const visible = el => {
-                    const rect = el.getBoundingClientRect();
-                    const style = getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0
-                        && style.display !== 'none' && style.visibility !== 'hidden';
-                };
-                const matches = Array.from(dropdown.querySelectorAll('*')).filter(el => {
-                    if ((el.textContent || '').trim() !== wanted || !visible(el)) return false;
-                    return !Array.from(el.children).some(
-                        child => (child.textContent || '').trim() === wanted && visible(child)
-                    );
-                });
-                if (matches.length === 1) matches[0].click();
-                return {matchCount: matches.length};
-            }""",
-            {"selectId": select_id, "wanted": label},
-        )
-        if clicked.get("matchCount") != 1:
+        click_evaluation_interrupted = False
+        try:
+            clicked = await self._page.evaluate(
+                """({selectId, wanted}) => {
+                    const select = document.getElementById(selectId);
+                    const root = select && (select.closest('li.block') || select.parentElement);
+                    const dropdown = root && root.querySelector('.bf-select-dropdown');
+                    if (!dropdown) return {matchCount: 0};
+                    const visible = el => {
+                        const rect = el.getBoundingClientRect();
+                        const style = getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0
+                            && style.display !== 'none' && style.visibility !== 'hidden';
+                    };
+                    const matches = Array.from(dropdown.querySelectorAll('*')).filter(el => {
+                        if ((el.textContent || '').trim() !== wanted || !visible(el)) return false;
+                        return !Array.from(el.children).some(
+                            child => (child.textContent || '').trim() === wanted && visible(child)
+                        );
+                    });
+                    if (matches.length === 1) matches[0].click();
+                    return {matchCount: matches.length};
+                }""",
+                {"selectId": select_id, "wanted": label},
+            )
+        except Exception:
+            # 旧页面点击选项会同步导航，Playwright 的 evaluate 上下文随页面销毁。
+            # 后续必须通过新页面可见回显再次验证，不能仅凭此异常认定成功。
+            clicked = None
+            click_evaluation_interrupted = True
+        if clicked is not None and clicked.get("matchCount") != 1:
             raise AliPCBrowserError(
                 "pc_filter_resolution_failed",
                 f"无法唯一点击{dimension}自定义选项: {label}",
@@ -801,6 +811,7 @@ class AliPCBrowserClient:
                     "url": self._page.url,
                     "controlType": "bf-select",
                     "selectId": select_id,
+                    "clickEvaluationInterrupted": click_evaluation_interrupted,
                 }
             remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
             if remaining_ms <= 0:
@@ -1027,7 +1038,11 @@ class AliPCBrowserClient:
                 return {
                     "error": "pc_browser_search_failed",
                     "message": str(exc),
-                    "diagnostics": {"url": self._page.url if self._page else None},
+                    "diagnostics": {
+                        "url": self._page.url if self._page else None,
+                        "exception_type": type(exc).__name__,
+                        "appliedFilters": locals().get("applied_filters", []),
+                    },
                 }
 
     async def close(self) -> dict:

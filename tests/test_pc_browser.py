@@ -401,7 +401,48 @@ def test_pc_choice_operates_bf_select_and_verifies_visible_content():
         "url": "https://sf.taobao.com/list/status-doing.htm",
         "controlType": "bf-select",
         "selectId": "J_AuctionStatusSort",
+        "clickEvaluationInterrupted": False,
     }
+
+
+def test_pc_bf_select_accepts_navigation_interruption_only_after_visible_verification():
+    class FakePage:
+        url = "https://sf.taobao.com/item_list.htm"
+        selected = "拍卖状态"
+        evaluate_calls = 0
+
+        async def eval_on_selector_all(self, selector, script):
+            return [{
+                "index": 1,
+                "id": "J_AuctionStatusSort",
+                "selected": None,
+                "customSelected": self.selected,
+                "nativeOptions": [],
+                "customOptions": ["拍卖状态", "正在进行"],
+                "options": ["拍卖状态", "正在进行"],
+            }]
+
+        async def evaluate(self, script, argument):
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                return {"ok": True, "selected": self.selected}
+            self.selected = "正在进行"
+            self.url = "https://sf.taobao.com/list/status-doing.htm"
+            raise RuntimeError("Execution context was destroyed by navigation")
+
+        async def wait_for_timeout(self, milliseconds):
+            return None
+
+        async def wait_for_load_state(self, state, timeout):
+            return None
+
+    client = AliPCBrowserClient()
+    client._page = FakePage()
+
+    trace = asyncio.run(client._apply_choice_exact("正在进行", "status"))
+
+    assert trace["url"] == "https://sf.taobao.com/list/status-doing.htm"
+    assert trace["clickEvaluationInterrupted"] is True
 
 
 def test_pc_matrix_scenario_requires_matching_application_receipt():
