@@ -355,6 +355,55 @@ def test_pc_choice_falls_back_to_unique_exact_same_site_link():
     }
 
 
+def test_pc_choice_operates_bf_select_and_verifies_visible_content():
+    class FakePage:
+        url = "https://sf.taobao.com/item_list.htm"
+        selected = "拍卖状态"
+        evaluate_calls = 0
+
+        async def eval_on_selector_all(self, selector, script):
+            assert selector == "select"
+            return [{
+                "index": 1,
+                "id": "J_AuctionStatusSort",
+                "name": None,
+                "selected": None,
+                "customSelected": self.selected,
+                "nativeOptions": [],
+                "customOptions": ["拍卖状态", "正在进行", "已结束"],
+                "options": ["拍卖状态", "正在进行", "已结束"],
+            }]
+
+        async def evaluate(self, script, argument):
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                assert argument == "J_AuctionStatusSort"
+                return {"ok": True, "selected": self.selected}
+            assert argument == {"selectId": "J_AuctionStatusSort", "wanted": "正在进行"}
+            self.selected = "正在进行"
+            self.url = "https://sf.taobao.com/list/status-doing.htm"
+            return {"matchCount": 1}
+
+        async def wait_for_timeout(self, milliseconds):
+            return None
+
+        async def wait_for_load_state(self, state, timeout):
+            return None
+
+    client = AliPCBrowserClient()
+    client._page = FakePage()
+
+    trace = asyncio.run(client._apply_choice_exact("正在进行", "status"))
+
+    assert trace == {
+        "dimension": "status",
+        "label": "正在进行",
+        "url": "https://sf.taobao.com/list/status-doing.htm",
+        "controlType": "bf-select",
+        "selectId": "J_AuctionStatusSort",
+    }
+
+
 def test_pc_matrix_scenario_requires_matching_application_receipt():
     result = {
         "source": "ali_pc_browser",

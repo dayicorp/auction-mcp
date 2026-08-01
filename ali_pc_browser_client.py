@@ -27,6 +27,24 @@ _SELECT_DIMENSION_MARKERS = {
 }
 
 
+def _select_dimension(entry: dict) -> str | None:
+    identity = f"{entry.get('id') or ''} {entry.get('name') or ''}".lower()
+    if "auctionstatus" in identity:
+        return "status"
+    if "auctionstage" in identity or "auction_stage" in identity:
+        return "stage"
+    if "pricerange" in identity or "price_range" in identity:
+        return "price_range"
+    options = {str(option).strip() for option in entry.get("options", [])}
+    return next(
+        (
+            dimension for dimension, marker in _SELECT_DIMENSION_MARKERS.items()
+            if marker in options
+        ),
+        None,
+    )
+
+
 class AliPCBrowserError(RuntimeError):
     """带稳定错误码的 PC 浏览器适配器错误."""
 
@@ -472,15 +490,39 @@ class AliPCBrowserClient:
         return await self._page.eval_on_selector_all(
             "select",
             """selects => selects.map((select, index) => ({
+                select,
                 index,
-                id: select.id || null,
-                name: select.name || null,
-                className: select.className || null,
-                selected: select.selectedOptions.length
-                    ? (select.selectedOptions[0].textContent || '').trim()
-                    : null,
-                options: Array.from(select.options).map(o => (o.textContent || '').trim())
-            }))""",
+                root: select.closest('li.block') || select.parentElement
+            })).map(({select, index, root}) => {
+                const nativeOptions = Array.from(select.options)
+                    .map(o => (o.textContent || '').trim()).filter(Boolean);
+                const content = root ? root.querySelector('.bf-select-content') : null;
+                const dropdown = root ? root.querySelector('.bf-select-dropdown') : null;
+                const customOptions = dropdown
+                    ? Array.from(dropdown.querySelectorAll('*'))
+                        .filter(el => {
+                            const text = (el.textContent || '').trim();
+                            if (!text || text.length > 40) return false;
+                            return !Array.from(el.children).some(
+                                child => (child.textContent || '').trim() === text
+                            );
+                        })
+                        .map(el => (el.textContent || '').trim())
+                    : [];
+                return {
+                    index,
+                    id: select.id || null,
+                    name: select.name || null,
+                    className: select.className || null,
+                    selected: select.selectedOptions.length
+                        ? (select.selectedOptions[0].textContent || '').trim()
+                        : null,
+                    customSelected: content ? (content.textContent || '').trim() : null,
+                    nativeOptions,
+                    customOptions: Array.from(new Set(customOptions)),
+                    options: Array.from(new Set(nativeOptions.concat(customOptions)))
+                };
+            })""",
         )
 
     async def _filter_options_snapshot_unlocked(self) -> dict:
@@ -522,13 +564,16 @@ class AliPCBrowserClient:
         dimensions: dict[str, dict] = {}
         for entry in selects:
             options = [str(option).strip() for option in entry.get("options", []) if str(option).strip()]
-            for dimension, marker in _SELECT_DIMENSION_MARKERS.items():
-                if marker in options and dimension not in dimensions:
-                    dimensions[dimension] = {
-                        "index": entry.get("index"),
-                        "selected": entry.get("selected"),
-                        "options": options,
-                    }
+            dimension = _select_dimension(entry)
+            if dimension and dimension not in dimensions:
+                dimensions[dimension] = {
+                    "index": entry.get("index"),
+                    "id": entry.get("id"),
+                    "selected": entry.get("customSelected") or entry.get("selected"),
+                    "nativeOptions": entry.get("nativeOptions", []),
+                    "customOptions": entry.get("customOptions", []),
+                    "options": options,
+                }
 
         controls = await self._page.eval_on_selector_all(
             "input",
@@ -640,7 +685,10 @@ class AliPCBrowserClient:
     async def _select_option_exact(self, label: str, dimension: str) -> dict:
         assert self._page is not None
         selects = await self._read_select_entries()
-        matches = [entry for entry in selects if label in entry["options"]]
+        matches = [
+            entry for entry in selects
+            if label in (entry.get("nativeOptions") or entry.get("options", []))
+        ]
         if len(matches) != 1:
             raise AliPCBrowserError(
                 "pc_filter_resolution_failed",
@@ -669,19 +717,129 @@ class AliPCBrowserClient:
                 )
             await self._page.wait_for_timeout(min(250, remaining_ms))
 
+    async def _select_custom_option_exact(
+        self,
+        entry: dict,
+        label: str,
+        dimension: str,
+    ) -> dict:
+        """操作真实 bf-select 组件并验证可见回显，底层隐藏 select 仅作定位."""
+        assert self._page is not None
+        select_id = str(entry.get("id") or "")
+        if not select_id:
+            raise AliPCBrowserError(
+                "pc_filter_resolution_failed",
+                f"{dimension}自定义控件缺少稳定 select id",
+                {"dimension": dimension, "name": label},
+            )
+        trigger = await self._page.evaluate(
+            """selectId => {
+                const select = document.getElementById(selectId);
+                const root = select && (select.closest('li.block') || select.parentElement);
+                const content = root && root.querySelector('.bf-select-content');
+                if (!content) return {ok: false};
+                content.click();
+                return {ok: true, selected: (content.textContent || '').trim()};
+            }""",
+            select_id,
+        )
+        if not trigger.get("ok"):
+            raise AliPCBrowserError(
+                "pc_filter_resolution_failed",
+                f"无法展开{dimension}自定义控件: {label}",
+                {"dimension": dimension, "name": label, "select_id": select_id},
+            )
+        await self._page.wait_for_timeout(200)
+        clicked = await self._page.evaluate(
+            """({selectId, wanted}) => {
+                const select = document.getElementById(selectId);
+                const root = select && (select.closest('li.block') || select.parentElement);
+                const dropdown = root && root.querySelector('.bf-select-dropdown');
+                if (!dropdown) return {matchCount: 0};
+                const visible = el => {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const matches = Array.from(dropdown.querySelectorAll('*')).filter(el => {
+                    if ((el.textContent || '').trim() !== wanted || !visible(el)) return false;
+                    return !Array.from(el.children).some(
+                        child => (child.textContent || '').trim() === wanted && visible(child)
+                    );
+                });
+                if (matches.length === 1) matches[0].click();
+                return {matchCount: matches.length};
+            }""",
+            {"selectId": select_id, "wanted": label},
+        )
+        if clicked.get("matchCount") != 1:
+            raise AliPCBrowserError(
+                "pc_filter_resolution_failed",
+                f"无法唯一点击{dimension}自定义选项: {label}",
+                {
+                    "dimension": dimension,
+                    "name": label,
+                    "select_id": select_id,
+                    "match_count": clicked.get("matchCount"),
+                },
+            )
+        try:
+            await self._page.wait_for_load_state("domcontentloaded", timeout=self.timeout_ms)
+        except Exception:
+            pass
+        deadline = asyncio.get_running_loop().time() + min(5, self.timeout_ms / 1000)
+        while True:
+            current = await self._read_select_entries()
+            selected = next((item for item in current if item.get("id") == select_id), None)
+            if selected and (
+                selected.get("customSelected") == label or selected.get("selected") == label
+            ):
+                return {
+                    "dimension": dimension,
+                    "label": label,
+                    "url": self._page.url,
+                    "controlType": "bf-select",
+                    "selectId": select_id,
+                }
+            remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
+            if remaining_ms <= 0:
+                raise AliPCBrowserError(
+                    "pc_filter_application_failed",
+                    f"页面未确认已应用{dimension}自定义选项: {label}",
+                    {"dimension": dimension, "name": label, "select_id": select_id},
+                )
+            await self._page.wait_for_timeout(min(250, remaining_ms))
+
     async def _apply_choice_exact(self, label: str, dimension: str) -> dict:
-        """原生 select 优先；无原生选项时只接受唯一的同站精确链接."""
+        """bf-select/原生 select 优先；否则只接受唯一的同站精确链接."""
         selects = await self._read_select_entries()
-        matches = [entry for entry in selects if label in entry.get("options", [])]
-        if len(matches) == 1:
+        custom_matches = [
+            entry for entry in selects
+            if _select_dimension(entry) == dimension
+            and label in entry.get("customOptions", [])
+        ]
+        if len(custom_matches) == 1:
+            return await self._select_custom_option_exact(custom_matches[0], label, dimension)
+        if len(custom_matches) > 1:
+            raise AliPCBrowserError(
+                "pc_filter_resolution_failed",
+                f"无法唯一解析{dimension}自定义选项: {label}",
+                {"dimension": dimension, "name": label, "match_count": len(custom_matches)},
+            )
+        native_matches = [
+            entry for entry in selects
+            if label in (entry.get("nativeOptions") or entry.get("options", []))
+        ]
+        if len(native_matches) == 1:
             trace = await self._select_option_exact(label, dimension)
             trace["controlType"] = "select"
             return trace
-        if len(matches) > 1:
+        if len(native_matches) > 1:
             raise AliPCBrowserError(
                 "pc_filter_resolution_failed",
                 f"无法唯一解析{dimension}原生下拉选项: {label}",
-                {"dimension": dimension, "name": label, "match_count": len(matches)},
+                {"dimension": dimension, "name": label, "match_count": len(native_matches)},
             )
         trace = await self._navigate_exact_link(label, dimension)
         trace["controlType"] = "link"
