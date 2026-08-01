@@ -711,6 +711,23 @@ async def ali_pc_search_judicial(
 
 
 @mcp.tool()
+async def ali_pc_get_item_detail(item_id: str) -> dict:
+    """**[Interactive Experimental]** 读取一个登录态阿里 PC 拍品详情页.
+
+    使用前必须先调用 `ali_pc_browser_start` 并由用户手动完成登录或验证。
+    `item_id` 应来自 `ali_pc_search_judicial` 返回的 `itemId`。工具只允许
+    8-20 位数字 ID，并固定导航到已验证的
+    `https://sf-item.taobao.com/sf_item/{item_id}.htm`。
+
+    工具会核验最终 URL 与 item_id 一致，轮询等待标的正文和附件容器结束
+    “加载中”状态，再返回价格、拍卖时间、法院、联系人、位置、正文和附件等
+    结构化字段。登录、滑块、二维码或风控返回 `action_required`，不会自动
+    绕过，也不会读取、导出或保存 Cookie。
+    """
+    return await ali_pc.get_item_detail(item_id)
+
+
+@mcp.tool()
 async def ali_pc_browser_close() -> dict:
     """关闭阿里 PC 浏览器会话并销毁进程内登录态."""
     return await ali_pc.close()

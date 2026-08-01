@@ -8,18 +8,124 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+SYNTHETIC_TEST_PHONE = "138" + "0000" + "0000"
+
 from ali_pc_browser_client import (
-    _redact_url,
+    _normalize_pc_detail_snapshot,
     _pagination_current_page,
     _pagination_next_candidates,
+    _pc_detail_url_matches,
+    _redact_url,
+    _validate_pc_item_id,
     _validate_pc_page,
     AliPCBrowserClient,
     AliPCBrowserError,
+    build_pc_detail_url,
     build_pc_search_url,
     evaluate_pc_live_acceptance,
     evaluate_pc_matrix_scenario,
     parse_pc_item_records,
 )
+
+
+def _ready_detail_snapshot() -> dict:
+    return {
+        "title": "江门市蓬江区泰和广场11号之三402室",
+        "bodyText": (
+            "一拍 即将开始 2026-08-06 10:00开拍 0人报名 "
+            "27人设置提醒 940次围观 江门市蓬江区人民法院 "
+            f"联系方式：陈生 手机：{SYNTHETIC_TEST_PHONE}"
+        ),
+        "labelBlocks": {
+            "当前价": None,
+            "变卖价": None,
+            "起拍价": "起拍价：¥330,176元",
+            "评估价": "评估价：¥471,680元",
+            "保证金": "保证金：¥33,018元",
+            "加价幅度": "加价幅度：¥3,000元",
+            "延时周期": "延时周期：5分钟",
+            "竞价周期": "竞价周期：1天",
+            "联系方式": f"联系方式：陈生 手机：{SYNTHETIC_TEST_PHONE}",
+            "标的公告": "标的公告：查看公告",
+        },
+        "detailPresent": True,
+        "detailText": (
+            "标的物介绍 相关附件下载 标的物位置 "
+            "广东省 江门市 蓬江区泰和广场11号之三402室。"
+        ),
+        "detailLoading": False,
+        "attachmentPresent": True,
+        "attachmentText": "相关附件下载：竞买公告",
+        "attachmentLoading": False,
+        "attachments": [{
+            "text": "竞买公告",
+            "url": "https://sf-item.taobao.com/notice.pdf?x5secdata=secret",
+        }],
+        "announcementUrl": "https://sf-item.taobao.com/notice.htm?x5secdata=secret",
+        "images": [
+            "https://img.alicdn.com/a.jpg?x5secdata=secret",
+            "https://img.alicdn.com/a.jpg?x5secdata=secret",
+        ],
+    }
+
+
+@pytest.mark.parametrize("value", [True, "abc", "1234567", "1" * 21, "106/../../"])
+def test_pc_detail_item_id_rejects_invalid_values(value):
+    with pytest.raises(AliPCBrowserError) as exc_info:
+        _validate_pc_item_id(value)
+
+    assert exc_info.value.code == "pc_detail_validation_failed"
+
+
+def test_pc_detail_url_is_fixed_to_verified_host_and_item_path():
+    item_id = "1062507630078"
+    assert _validate_pc_item_id(item_id) == item_id
+    assert build_pc_detail_url(item_id) == (
+        "https://sf-item.taobao.com/sf_item/1062507630078.htm"
+    )
+    assert _pc_detail_url_matches(
+        f"https://sf-item.taobao.com/sf_item/{item_id}.htm?track_id=public",
+        item_id,
+    )
+    for url in (
+        f"http://sf-item.taobao.com/sf_item/{item_id}.htm",
+        f"https://example.com/sf_item/{item_id}.htm",
+        f"https://sf-item.taobao.com:443/sf_item/{item_id}.htm",
+        f"https://sf-item.taobao.com:invalid/sf_item/{item_id}.htm",
+        "https://sf-item.taobao.com/sf_item/1062507630079.htm",
+    ):
+        assert not _pc_detail_url_matches(url, item_id)
+
+
+def test_pc_detail_snapshot_normalizes_verified_schema_and_redacts_risk_tokens():
+    item_id = "1062507630078"
+    detail = _normalize_pc_detail_snapshot(
+        _ready_detail_snapshot(),
+        item_id=item_id,
+        url=build_pc_detail_url(item_id),
+        page_title="fallback title",
+    )
+
+    assert detail["source"] == "ali_pc_browser"
+    assert detail["itemId"] == item_id
+    assert detail["title"] == "江门市蓬江区泰和广场11号之三402室"
+    assert detail["status"] == "即将开始"
+    assert detail["stage"] == "一拍"
+    assert detail["auctionStartAt"] == "2026-08-06 10:00"
+    assert detail["currentPriceYuan"] is None
+    assert detail["startingPriceYuan"] == 330_176
+    assert detail["appraisalPriceYuan"] == 471_680
+    assert detail["depositYuan"] == 33_018
+    assert detail["incrementYuan"] == 3_000
+    assert detail["registrationCount"] == 0
+    assert detail["reminderCount"] == 27
+    assert detail["viewCount"] == 940
+    assert detail["court"] == "江门市蓬江区人民法院"
+    assert detail["contact"] == {"name": "陈生", "phone": SYNTHETIC_TEST_PHONE}
+    assert detail["location"].endswith("蓬江区泰和广场11号之三402室")
+    assert "secret" not in detail["announcementUrl"]
+    assert "secret" not in detail["attachments"][0]["url"]
+    assert detail["images"] == ["https://img.alicdn.com/a.jpg?x5secdata=REDACTED"]
 
 
 @pytest.mark.parametrize("value", [0, 6, -1, True, 1.5, "2"])
@@ -640,6 +746,181 @@ def test_pc_search_requires_started_browser():
     client = AliPCBrowserClient()
     result = asyncio.run(client.search(keyword="住宅"))
     assert result["error"] == "pc_browser_not_started"
+
+
+def test_pc_detail_requires_started_browser():
+    client = AliPCBrowserClient()
+    result = asyncio.run(client.get_item_detail("1062507630078"))
+    assert result["error"] == "pc_browser_not_started"
+
+
+def test_pc_detail_waits_until_body_and_attachments_finish_loading():
+    loading = _ready_detail_snapshot()
+    loading.update({
+        "detailText": "标的物详情加载中......",
+        "detailLoading": True,
+        "attachmentText": "附件加载中......",
+        "attachmentLoading": True,
+    })
+    ready = _ready_detail_snapshot()
+
+    class FakePage:
+        url = "https://sf-item.taobao.com/sf_item/1062507630078.htm"
+
+        def __init__(self):
+            self.snapshots = [loading, ready]
+            self.waits = []
+
+        async def evaluate(self, script):
+            assert "J_ItemDetailContent" in script
+            return self.snapshots.pop(0)
+
+        async def title(self):
+            return "江门住宅详情"
+
+        async def wait_for_timeout(self, timeout):
+            self.waits.append(timeout)
+
+    client = AliPCBrowserClient(timeout_ms=1_000)
+    client._page = FakePage()
+
+    snapshot, diagnostics = asyncio.run(
+        client._wait_for_detail_snapshot("1062507630078")
+    )
+
+    assert snapshot["detailText"].startswith("标的物介绍")
+    assert diagnostics == {
+        "poll_attempts": 2,
+        "price_ready": True,
+        "detail_ready": True,
+        "attachment_ready": True,
+        "url_ready": True,
+    }
+    assert len(client._page.waits) == 1
+
+
+def test_pc_detail_query_returns_structured_ready_snapshot_without_cookie_state():
+    item_id = "1062507630078"
+
+    class BodyLocator:
+        async def inner_text(self, timeout=None):
+            return "司法拍卖详情 即将开始"
+
+    class FakePage:
+        url = "https://sf.taobao.com/"
+
+        def is_closed(self):
+            return False
+
+        async def goto(self, url, wait_until=None):
+            assert wait_until == "domcontentloaded"
+            self.url = url
+
+        async def title(self):
+            return "江门住宅详情"
+
+        def locator(self, selector):
+            assert selector == "body"
+            return BodyLocator()
+
+    class FakeClient(AliPCBrowserClient):
+        async def _status_unlocked(self):
+            return {"state": "ready", "authenticated": True}
+
+        async def _wait_for_detail_snapshot(self, requested_item_id):
+            assert requested_item_id == item_id
+            return _ready_detail_snapshot(), {
+                "poll_attempts": 2,
+                "price_ready": True,
+                "detail_ready": True,
+                "attachment_ready": True,
+                "url_ready": True,
+            }
+
+    client = FakeClient()
+    client._page = FakePage()
+
+    result = asyncio.run(client.get_item_detail(item_id))
+
+    assert result["itemId"] == item_id
+    assert result["startingPriceYuan"] == 330_176
+    assert result["authenticated_session"] is True
+    assert result["cookie_exported"] is False
+    assert result["cookie_persisted_by_adapter"] is False
+
+
+def test_pc_detail_query_fails_closed_on_final_url_mismatch():
+    class BodyLocator:
+        async def inner_text(self, timeout=None):
+            return "司法拍卖详情"
+
+    class FakePage:
+        url = "https://sf.taobao.com/"
+
+        def is_closed(self):
+            return False
+
+        async def goto(self, url, wait_until=None):
+            self.url = "https://example.com/sf_item/1062507630078.htm"
+
+        async def title(self):
+            return "错误目标"
+
+        def locator(self, selector):
+            return BodyLocator()
+
+    class FakeClient(AliPCBrowserClient):
+        async def _status_unlocked(self):
+            return {"state": "ready", "authenticated": True}
+
+    client = FakeClient()
+    client._page = FakePage()
+    result = asyncio.run(client.get_item_detail("1062507630078"))
+
+    assert result["error"] == "pc_detail_target_mismatch"
+
+
+def test_pc_detail_query_fails_closed_while_async_content_is_incomplete():
+    item_id = "1062507630078"
+
+    class BodyLocator:
+        async def inner_text(self, timeout=None):
+            return "司法拍卖详情"
+
+    class FakePage:
+        url = build_pc_detail_url(item_id)
+
+        def is_closed(self):
+            return False
+
+        async def goto(self, url, wait_until=None):
+            self.url = url
+
+        async def title(self):
+            return "江门住宅详情"
+
+        def locator(self, selector):
+            return BodyLocator()
+
+    class FakeClient(AliPCBrowserClient):
+        async def _status_unlocked(self):
+            return {"state": "ready", "authenticated": True}
+
+        async def _wait_for_detail_snapshot(self, requested_item_id):
+            return _ready_detail_snapshot(), {
+                "poll_attempts": 3,
+                "price_ready": True,
+                "detail_ready": False,
+                "attachment_ready": False,
+                "url_ready": True,
+            }
+
+    client = FakeClient()
+    client._page = FakePage()
+    result = asyncio.run(client.get_item_detail(item_id))
+
+    assert result["error"] == "pc_detail_content_not_ready"
+    assert result["diagnostics"]["detail_ready"] is False
 
 
 def test_pc_search_wires_page_to_verified_pagination_navigation():

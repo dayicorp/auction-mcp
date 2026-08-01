@@ -16,9 +16,12 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 PC_HOME_URL = "https://sf.taobao.com/"
 PC_KEYWORD_URL = "https://sf.taobao.com/item_list.htm"
+PC_DETAIL_URL_TEMPLATE = "https://sf-item.taobao.com/sf_item/{item_id}.htm"
 _PC_ALLOWED_HOST = "sf.taobao.com"
+_PC_DETAIL_ALLOWED_HOST = "sf-item.taobao.com"
 _PUNISH_MARKERS = ("/_____tmd_____/punish", "x5secdata=")
 _VERIFICATION_MARKERS = ("安全验证", "滑动验证", "请完成验证", "请拖动滑块")
+_DETAIL_LOADING_MARKERS = ("标的物详情加载中", "附件加载中")
 _SELECT_DIMENSION_MARKERS = {
     "sort": "默认排序",
     "status": "拍卖状态",
@@ -65,6 +68,68 @@ _PC_PAGER_SNAPSHOT_SCRIPT = r"""() => {
     })).filter(item => /^\d+$/.test(item.text)).slice(0, 10);
     return {controls, current};
 }"""
+_PC_DETAIL_SNAPSHOT_SCRIPT = r"""() => {
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const visible = element => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden'
+            && rect.width > 0 && rect.height > 0;
+    };
+    const bodyText = clean(document.body ? document.body.innerText : '').slice(0, 20000);
+    const candidates = Array.from(document.querySelectorAll('span,li,p,div,td,dd'))
+        .filter(visible).map(element => clean(element.innerText || element.textContent))
+        .filter(text => text && text.length <= 300);
+    const labels = [
+        '当前价', '变卖价', '起拍价', '评估价', '保证金', '加价幅度',
+        '延时周期', '竞价周期', '联系方式', '标的公告'
+    ];
+    const labelBlocks = {};
+    for (const label of labels) {
+        const matches = candidates.filter(text => text.includes(label))
+            .sort((left, right) => left.length - right.length);
+        labelBlocks[label] = matches.length ? matches[0] : null;
+    }
+    const titleNode = Array.from(document.querySelectorAll('h1'))
+        .find(element => visible(element) && clean(element.innerText));
+    const detailNode = document.querySelector('#J_ItemDetailContent');
+    const attachmentNode = document.querySelector('#J_ItemAttachContent');
+    const detailText = detailNode && visible(detailNode)
+        ? clean(detailNode.innerText || detailNode.textContent).slice(0, 10000)
+        : '';
+    const attachmentText = attachmentNode && visible(attachmentNode)
+        ? clean(attachmentNode.innerText || attachmentNode.textContent).slice(0, 3000)
+        : '';
+    const attachments = attachmentNode
+        ? Array.from(attachmentNode.querySelectorAll('a[href]')).filter(visible)
+            .map(anchor => ({
+                text: clean(anchor.innerText || anchor.textContent).slice(0, 120),
+                url: anchor.href || null,
+            })).filter(item => item.url).slice(0, 20)
+        : [];
+    const announcement = Array.from(document.querySelectorAll('a[href]'))
+        .filter(visible).map(anchor => ({
+            text: clean(anchor.innerText || anchor.textContent),
+            url: anchor.href || null,
+        })).find(item => item.text.includes('查看公告') || item.text.includes('标的公告'));
+    const images = Array.from(document.querySelectorAll('img'))
+        .filter(visible).map(image => image.currentSrc || image.src || null)
+        .filter(url => /^https?:\/\//.test(url || '')).slice(0, 20);
+    return {
+        title: titleNode ? clean(titleNode.innerText || titleNode.textContent) : '',
+        bodyText,
+        labelBlocks,
+        detailPresent: Boolean(detailNode),
+        detailText,
+        detailLoading: detailText.includes('标的物详情加载中'),
+        attachmentPresent: Boolean(attachmentNode),
+        attachmentText,
+        attachmentLoading: attachmentText.includes('附件加载中'),
+        attachments,
+        announcementUrl: announcement ? announcement.url : null,
+        images,
+    };
+}"""
 
 
 def _redact_url(url: str | None) -> str | None:
@@ -85,6 +150,145 @@ def _validate_pc_page(value: Any) -> int:
             f"page 必须是 1 到 {_PC_MAX_PAGE} 之间的整数",
         )
     return value
+
+
+def _validate_pc_item_id(value: Any) -> str:
+    if isinstance(value, bool):
+        raise AliPCBrowserError(
+            "pc_detail_validation_failed",
+            "item_id 必须是 8 到 20 位数字",
+        )
+    item_id = str(value).strip()
+    if not re.fullmatch(r"\d{8,20}", item_id):
+        raise AliPCBrowserError(
+            "pc_detail_validation_failed",
+            "item_id 必须是 8 到 20 位数字",
+        )
+    return item_id
+
+
+def build_pc_detail_url(item_id: Any) -> str:
+    return PC_DETAIL_URL_TEMPLATE.format(item_id=_validate_pc_item_id(item_id))
+
+
+def _pc_detail_url_matches(url: str, item_id: str) -> bool:
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and parts.hostname == _PC_DETAIL_ALLOWED_HOST
+        and port is None
+        and parts.username is None
+        and parts.password is None
+        and parts.path.rstrip("/") == f"/sf_item/{item_id}.htm"
+    )
+
+
+def _yuan_from_text(text: str | None, label: str) -> int | float | None:
+    if not text or label not in text:
+        return None
+    segment = text.split(label, 1)[1]
+    match = re.search(r"[:：\s¥￥]*([0-9][0-9,]*(?:\.\d+)?)\s*(万|亿)?", segment)
+    if not match:
+        return None
+    amount = Decimal(match.group(1).replace(",", ""))
+    multiplier = {None: Decimal(1), "万": Decimal(10_000), "亿": Decimal(100_000_000)}[
+        match.group(2)
+    ]
+    value = amount * multiplier
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+def _normalize_pc_detail_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    item_id: str,
+    url: str,
+    page_title: str,
+) -> dict[str, Any]:
+    body = str(snapshot.get("bodyText") or "")
+    detail_text = str(snapshot.get("detailText") or "")
+    label_blocks = snapshot.get("labelBlocks") or {}
+
+    def amount(label: str) -> int | float | None:
+        return _yuan_from_text(label_blocks.get(label), label)
+
+    current_price = amount("当前价")
+    if current_price is None:
+        current_price = amount("变卖价")
+    counts = {
+        "registrationCount": None,
+        "reminderCount": None,
+        "viewCount": None,
+    }
+    for key, pattern in (
+        ("registrationCount", r"(\d+)\s*人报名"),
+        ("reminderCount", r"(\d+)\s*人(?:设置)?提醒"),
+        ("viewCount", r"(\d+)\s*次围观"),
+    ):
+        match = re.search(pattern, body)
+        if match:
+            counts[key] = int(match.group(1))
+
+    start_match = re.search(r"(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2})(?:[^\d]|$)", body)
+    court_match = re.search(r"([\u4e00-\u9fff]{2,30}(?:人民法院|法院))", body)
+    phone_match = re.search(r"(?<!\d)(1[3-9]\d{9})(?!\d)", body)
+    contact_block = str(label_blocks.get("联系方式") or "")
+    contact_match = re.search(r"联系方式\s*[:：]?\s*([^\s，,；;]+)", contact_block)
+    location_match = re.search(r"标的物位置\s*([^。；;]+)", detail_text)
+    status = next(
+        (candidate for candidate in ("正在进行", "即将开始", "已结束", "中止", "撤回")
+         if candidate in body),
+        None,
+    )
+    stage = next(
+        (candidate for candidate in ("重新拍卖", "二拍", "一拍", "变卖") if candidate in body),
+        None,
+    )
+    attachments = [
+        {
+            "text": str(entry.get("text") or "").strip() or None,
+            "url": _redact_url(entry.get("url")),
+        }
+        for entry in snapshot.get("attachments", [])
+        if entry.get("url")
+    ]
+    return {
+        "source": "ali_pc_browser",
+        "itemId": item_id,
+        "url": _redact_url(url),
+        "title": str(snapshot.get("title") or page_title).strip(),
+        "status": status,
+        "stage": stage,
+        "auctionStartAt": start_match.group(1) if start_match else None,
+        "currentPriceYuan": current_price,
+        "startingPriceYuan": amount("起拍价"),
+        "appraisalPriceYuan": amount("评估价"),
+        "depositYuan": amount("保证金"),
+        "incrementYuan": amount("加价幅度"),
+        **counts,
+        "delayPeriod": label_blocks.get("延时周期"),
+        "biddingPeriod": label_blocks.get("竞价周期"),
+        "court": court_match.group(1) if court_match else None,
+        "contact": {
+            "name": contact_match.group(1) if contact_match else None,
+            "phone": phone_match.group(1) if phone_match else None,
+        },
+        "announcementUrl": _redact_url(snapshot.get("announcementUrl")),
+        "location": location_match.group(1).strip() if location_match else None,
+        "images": list(
+            dict.fromkeys(
+                redacted
+                for image_url in snapshot.get("images", [])
+                if (redacted := _redact_url(image_url))
+            )
+        ),
+        "detailText": detail_text,
+        "attachments": attachments,
+    }
 
 
 def _pagination_current_page(snapshot: dict[str, Any]) -> int | None:
@@ -558,7 +762,7 @@ class AliPCBrowserClient:
             "url": url,
             "title": title,
             "message": (
-                "浏览器会话已登录，可调用 ali_pc_search_judicial"
+                "浏览器会话已登录，可调用 ali_pc_search_judicial 或 ali_pc_get_item_detail"
                 if authenticated
                 else "请在已打开的 Chrome 窗口手动登录，完成后调用 ali_pc_browser_status"
             ),
@@ -1143,6 +1347,156 @@ class AliPCBrowserClient:
                     "candidate_record_count": last_candidate_count,
                 }
             await self._page.wait_for_timeout(min(500, remaining_ms))
+
+    async def _wait_for_detail_snapshot(
+        self,
+        item_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """等待详情正文与附件异步容器完成，拒绝把占位文本当作详情."""
+        assert self._page is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_ms / 1000
+        attempts = 0
+        last_snapshot: dict[str, Any] = {}
+        while True:
+            attempts += 1
+            last_snapshot = await self._page.evaluate(_PC_DETAIL_SNAPSHOT_SCRIPT)
+            title = await self._page.title()
+            action = self._action_required(
+                self._page.url,
+                title,
+                str(last_snapshot.get("bodyText") or ""),
+            )
+            if action:
+                return {"action_required": action}, {"poll_attempts": attempts}
+
+            label_blocks = last_snapshot.get("labelBlocks") or {}
+            price_ready = any(
+                label_blocks.get(label)
+                for label in ("当前价", "变卖价", "起拍价", "保证金", "评估价")
+            )
+            detail_ready = (
+                bool(last_snapshot.get("detailPresent"))
+                and bool(str(last_snapshot.get("detailText") or "").strip())
+                and not last_snapshot.get("detailLoading")
+            )
+            attachment_ready = (
+                bool(last_snapshot.get("attachmentPresent"))
+                and not last_snapshot.get("attachmentLoading")
+            )
+            loading_markers_present = any(
+                marker in (
+                    f"{last_snapshot.get('detailText') or ''} "
+                    f"{last_snapshot.get('attachmentText') or ''}"
+                )
+                for marker in _DETAIL_LOADING_MARKERS
+            )
+            detail_ready = detail_ready and not loading_markers_present
+            attachment_ready = attachment_ready and not loading_markers_present
+            url_ready = _pc_detail_url_matches(self._page.url, item_id)
+            if price_ready and detail_ready and attachment_ready and url_ready:
+                return last_snapshot, {
+                    "poll_attempts": attempts,
+                    "price_ready": True,
+                    "detail_ready": True,
+                    "attachment_ready": True,
+                    "url_ready": True,
+                }
+
+            remaining_ms = int((deadline - loop.time()) * 1000)
+            if remaining_ms <= 0:
+                return last_snapshot, {
+                    "poll_attempts": attempts,
+                    "price_ready": price_ready,
+                    "detail_ready": detail_ready,
+                    "attachment_ready": attachment_ready,
+                    "url_ready": url_ready,
+                    "detail_present": bool(last_snapshot.get("detailPresent")),
+                    "attachment_present": bool(last_snapshot.get("attachmentPresent")),
+                    "detail_loading": bool(last_snapshot.get("detailLoading")),
+                    "attachment_loading": bool(last_snapshot.get("attachmentLoading")),
+                }
+            await self._page.wait_for_timeout(min(500, remaining_ms))
+
+    async def get_item_detail(self, item_id: Any) -> dict[str, Any]:
+        """读取一个受限阿里 PC 详情页，不读取或持久化 Cookie."""
+        lock = await self._locked()
+        async with lock:
+            if not self._page or self._page.is_closed():
+                return {
+                    "error": "pc_browser_not_started",
+                    "message": "请先调用 ali_pc_browser_start，并在打开的 Chrome 窗口完成登录",
+                }
+            session = await self._status_unlocked()
+            if session.get("state") != "ready":
+                return session
+            try:
+                normalized_id = _validate_pc_item_id(item_id)
+                target_url = build_pc_detail_url(normalized_id)
+                await self._page.goto(target_url, wait_until="domcontentloaded")
+                title = await self._page.title()
+                body = await self._page.locator("body").inner_text(timeout=self.timeout_ms)
+                action = self._action_required(self._page.url, title, body)
+                if action:
+                    return action
+                if not _pc_detail_url_matches(self._page.url, normalized_id):
+                    raise AliPCBrowserError(
+                        "pc_detail_target_mismatch",
+                        "详情页最终 URL 与请求 item_id 不一致",
+                        {
+                            "item_id": normalized_id,
+                            "url": _redact_url(self._page.url),
+                        },
+                    )
+
+                snapshot, diagnostics = await self._wait_for_detail_snapshot(normalized_id)
+                if snapshot.get("action_required"):
+                    return snapshot["action_required"]
+                if not all(
+                    diagnostics.get(key)
+                    for key in (
+                        "price_ready",
+                        "detail_ready",
+                        "attachment_ready",
+                        "url_ready",
+                    )
+                ):
+                    raise AliPCBrowserError(
+                        "pc_detail_content_not_ready",
+                        "详情正文或附件仍处于异步加载状态，未返回不完整详情",
+                        {
+                            "item_id": normalized_id,
+                            "url": _redact_url(self._page.url),
+                            **diagnostics,
+                        },
+                    )
+
+                detail = _normalize_pc_detail_snapshot(
+                    snapshot,
+                    item_id=normalized_id,
+                    url=self._page.url,
+                    page_title=title,
+                )
+                return {
+                    **detail,
+                    "diagnostics": diagnostics,
+                    "authenticated_session": True,
+                    "cookie_policy": "browser_memory_only",
+                    "cookie_exported": False,
+                    "cookie_persisted_by_adapter": False,
+                }
+            except AliPCBrowserError as exc:
+                return exc.as_dict()
+            except Exception as exc:
+                return {
+                    "error": "pc_detail_query_failed",
+                    "message": "阿里 PC 详情读取失败",
+                    "diagnostics": {
+                        "item_id": str(item_id),
+                        "url": _redact_url(self._page.url if self._page else None),
+                        "exception_type": type(exc).__name__,
+                    },
+                }
 
     async def search(
         self,
