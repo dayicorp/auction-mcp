@@ -26,7 +26,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **地区参数 fail-closed** — 层级缺失或地区无法解析时, 在请求 Ali/JD provider 前返回结构化错误
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，需交互式 Live 验收
+- **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，已通过真实登录态 PC Live 验收
 - **119 项 pytest 测试** — 99 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
@@ -184,7 +184,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 ## Roadmap
 
 - [ ] **阿里拍品详情** — `queryHttpsItemDetail` mtop 被 baxia 风控拦 (需 `cna + tfstk + isg` cookie). 已规划: 本机 headless Playwright 一次性预热 cookie 注入 httpx, RGV587 时自动重预热.
-- [ ] **P2.4 PC 完整筛选交互式 Live 验收** — 适配器、URL/解析/隐私契约与 MCP 工具已实现并通过离线测试；需在用户手动登录会话中验证真实查询结果
+- [x] **P2.4 PC 完整筛选交互式 Live 验收** — 2026-08-01 在用户手动登录的非持久化 Chrome 会话中通过固定查询验收：20/20 条、价格 100360–195097 元、无超限或缺价项、查询参数完全匹配，Cookie 未导出或持久化
 - [x] ~~双端聚合 + 价格单位归一~~ (v2.1, 见 `search_judicial`)
 
 ## License
