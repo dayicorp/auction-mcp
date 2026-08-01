@@ -6,6 +6,7 @@ storage_state，也不指定用户数据目录。登录与验证码始终交给�
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -146,7 +147,7 @@ def build_pc_search_url(
 
 def _price_yuan_from_text(text: str) -> float | None:
     match = re.search(
-        r"(?:当前价|变卖价|起拍价)\s*[¥￥]?\s*([0-9][0-9,.]*)\s*(万|亿)?",
+        r"(?:当前价|变卖价|起拍价|开拍价)\s*[¥￥]?\s*([0-9][0-9,.]*)\s*(万|亿)?",
         text,
     )
     if not match:
@@ -171,7 +172,7 @@ def parse_pc_item_records(records: list[dict[str, Any]], limit: int = 20) -> lis
         if not id_match or id_match.group(1) in seen:
             continue
         text = str(record.get("text") or "").strip()
-        if not re.search(r"当前价|变卖价|起拍价|评估价|开始时间", text):
+        if not re.search(r"当前价|变卖价|起拍价|开拍价|评估价|开始时间", text):
             continue
         item_id = id_match.group(1)
         seen.add(item_id)
@@ -179,7 +180,7 @@ def parse_pc_item_records(records: list[dict[str, Any]], limit: int = 20) -> lis
         title = str(record.get("title") or "").strip()
         if not title:
             title = next(
-                (line for line in lines if not re.search(r"[¥￥]|当前价|变卖价|起拍价|评估价|开始时间", line)),
+                (line for line in lines if not re.search(r"[¥￥]|当前价|变卖价|起拍价|开拍价|评估价|开始时间", line)),
                 "",
             )
         items.append({
@@ -235,7 +236,9 @@ def evaluate_pc_live_acceptance(
     if over_limit_ids:
         failures.append("items_over_max_price")
 
-    query = dict(parse_qsl(urlsplit(str(result.get("url") or "")).query, keep_blank_values=True))
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    result_url = str(result.get("url") or diagnostics.get("url") or "")
+    query = dict(parse_qsl(urlsplit(result_url).query, keep_blank_values=True))
     expected_query = {
         "end_price": str(max_price_yuan),
         "auctionStartFrom": auction_start_from,
@@ -271,6 +274,8 @@ def evaluate_pc_live_acceptance(
             "over_limit_item_ids": over_limit_ids,
             "query_params": {key: query.get(key) for key in expected_query},
             "query_param_mismatches": mismatched_query,
+            "query_url": result_url,
+            "query_diagnostics": diagnostics,
             "samples": samples,
             "cookie_exported": False,
             "cookie_persisted_by_adapter": False,
@@ -291,8 +296,6 @@ class AliPCBrowserClient:
         self._page = None
 
     async def _locked(self):
-        import asyncio
-
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
@@ -439,6 +442,54 @@ class AliPCBrowserClient:
             # 部分旧页面 change 事件只做同步跳转；后续状态检查负责判定结果。
             pass
 
+    async def _wait_for_items(self, limit: int) -> tuple[list[dict], dict]:
+        """轮询等待旧 PC 页面异步渲染拍品卡片，避免 DOMContentLoaded 过早解析."""
+        assert self._page is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_ms / 1000
+        attempts = 0
+        last_candidate_count = 0
+        while True:
+            attempts += 1
+            records = await self._page.eval_on_selector_all(
+                "a[href]",
+                r"""anchors => anchors.map(a => {
+                    const href = a.href || '';
+                    if (!/\d{8,}/.test(href) || !/(?:sf_item\/|item\.htm)/.test(href)) return null;
+                    let root = a;
+                    for (let i = 0; i < 8 && root && root.parentElement; i++) {
+                        const parentText = (root.parentElement.innerText || '').trim();
+                        if (/当前价|变卖价|起拍价|开拍价|评估价|开始时间/.test(parentText)
+                            && parentText.length < 2500) {
+                            root = root.parentElement;
+                            break;
+                        }
+                        root = root.parentElement;
+                    }
+                    const image = root ? root.querySelector('img') : null;
+                    return {
+                        href,
+                        title: (a.getAttribute('title') || a.innerText || '').trim(),
+                        text: root ? (root.innerText || '').trim() : '',
+                        image: image ? (image.currentSrc || image.src || image.getAttribute('data-ks-lazyload')) : null
+                    };
+                }).filter(Boolean)""",
+            )
+            last_candidate_count = len(records)
+            items = parse_pc_item_records(records, limit=limit)
+            if items:
+                return items, {
+                    "poll_attempts": attempts,
+                    "candidate_record_count": last_candidate_count,
+                }
+            remaining_ms = int((deadline - loop.time()) * 1000)
+            if remaining_ms <= 0:
+                return [], {
+                    "poll_attempts": attempts,
+                    "candidate_record_count": last_candidate_count,
+                }
+            await self._page.wait_for_timeout(min(500, remaining_ms))
+
     async def search(
         self,
         *,
@@ -518,36 +569,22 @@ class AliPCBrowserClient:
                 action = self._action_required(self._page.url, title, body)
                 if action:
                     return action
-                records = await self._page.eval_on_selector_all(
-                    "a[href]",
-                    r"""anchors => anchors.map(a => {
-                        const href = a.href || '';
-                        if (!/sf_item|item\.htm/.test(href) || !/\d{8,}/.test(href)) return null;
-                        let root = a;
-                        for (let i = 0; i < 6 && root && root.parentElement; i++) {
-                            const parentText = (root.parentElement.innerText || '').trim();
-                            if (/当前价|变卖价|起拍价|评估价|开始时间/.test(parentText)
-                                && parentText.length < 1500) {
-                                root = root.parentElement;
-                                break;
-                            }
-                            root = root.parentElement;
-                        }
-                        const image = root ? root.querySelector('img') : null;
-                        return {
-                            href,
-                            title: (a.getAttribute('title') || a.innerText || '').trim(),
-                            text: root ? (root.innerText || '').trim() : '',
-                            image: image ? (image.currentSrc || image.src || image.getAttribute('data-ks-lazyload')) : null
-                        };
-                    }).filter(Boolean)""",
-                )
-                items = parse_pc_item_records(records, limit=limit)
+                items, parse_diagnostics = await self._wait_for_items(limit)
                 if not items:
+                    final_body = await self._page.locator("body").inner_text(timeout=self.timeout_ms)
                     return {
                         "error": "pc_result_parse_failed",
                         "message": "PC 页面已加载，但未能识别拍品卡片；未返回未经验证的空结果",
-                        "diagnostics": {"url": self._page.url, "title": title},
+                        "diagnostics": {
+                            "url": self._page.url,
+                            "title": title,
+                            "body_length": len(final_body),
+                            "body_has_price_markers": bool(re.search(
+                                r"当前价|变卖价|起拍价|开拍价|评估价|开始时间",
+                                final_body,
+                            )),
+                            **parse_diagnostics,
+                        },
                     }
                 return {
                     "source": "ali_pc_browser",

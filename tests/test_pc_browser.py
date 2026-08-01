@@ -139,9 +139,19 @@ def test_pc_live_acceptance_rejects_over_limit_or_missing_price():
     assert "items_missing_current_price" in report["failures"]
 
 
-def test_pc_live_acceptance_rejects_error_and_wrong_query_contract():
+def test_pc_live_acceptance_uses_error_diagnostic_url_without_false_param_failure():
     report = evaluate_pc_live_acceptance(
-        {"error": "pc_result_parse_failed", "items": [], "url": "https://sf.taobao.com/"},
+        {
+            "error": "pc_result_parse_failed",
+            "items": [],
+            "diagnostics": {
+                "url": (
+                    "https://sf.taobao.com/list/example.htm?end_price=210000"
+                    "&auctionStartFrom=2026-08-01&auctionStartTo=2026-09-01"
+                ),
+                "poll_attempts": 60,
+            },
+        },
         max_price_yuan=210_000,
         auction_start_from="2026-08-01",
         auction_start_to="2026-09-01",
@@ -149,7 +159,8 @@ def test_pc_live_acceptance_rejects_error_and_wrong_query_contract():
 
     assert report["accepted"] is False
     assert "query_error:pc_result_parse_failed" in report["failures"]
-    assert "verified_query_params_missing" in report["failures"]
+    assert "verified_query_params_missing" not in report["failures"]
+    assert report["evidence"]["query_diagnostics"]["poll_attempts"] == 60
 
 
 @pytest.mark.parametrize(
@@ -200,6 +211,35 @@ def test_pc_item_parser_deduplicates_and_normalizes_price_units():
     assert [item["itemId"] for item in items] == ["1061234567890", "1069876543210"]
     assert items[0]["currentPriceYuan"] == pytest.approx(113417)
     assert items[1]["currentPriceYuan"] == pytest.approx(125_000_000)
+
+
+def test_pc_wait_for_items_polls_until_dynamic_cards_render():
+    class FakePage:
+        def __init__(self):
+            self.calls = 0
+            self.waits: list[int] = []
+
+        async def eval_on_selector_all(self, selector, script):
+            self.calls += 1
+            if self.calls == 1:
+                return []
+            return [{
+                "href": "https://sf-item.taobao.com/sf_item/1061234567890.htm",
+                "title": "动态住宅",
+                "text": "动态住宅\n开拍价 ￥10.036万\n开始时间 08月16日",
+            }]
+
+        async def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    client = AliPCBrowserClient(timeout_ms=1_000)
+    client._page = FakePage()
+
+    items, diagnostics = asyncio.run(client._wait_for_items(limit=20))
+
+    assert items[0]["currentPriceYuan"] == pytest.approx(100_360)
+    assert diagnostics == {"poll_attempts": 2, "candidate_record_count": 1}
+    assert client._page.waits == [500]
 
 
 def test_pc_search_requires_started_browser():

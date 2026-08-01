@@ -29,6 +29,13 @@ def _print_report(report: dict) -> None:
     print("PC_LIVE_ACCEPTANCE=" + json.dumps(report, ensure_ascii=False, indent=2))
 
 
+def _pause_before_failure_close() -> None:
+    try:
+        input("验收未通过，浏览器暂时保留供检查；查看完成后按 Enter 关闭：")
+    except EOFError:
+        pass
+
+
 async def _run() -> int:
     client = AliPCBrowserClient(headless=False)
     try:
@@ -61,6 +68,7 @@ async def _run() -> int:
                     "cookie_persisted_by_adapter": False,
                 },
             })
+            _pause_before_failure_close()
             return 2
 
         print("登录态已确认，开始执行固定验收查询……")
@@ -72,6 +80,8 @@ async def _run() -> int:
             auction_start_to=QUERY["auction_start_to"],
         )
         _print_report(report)
+        if not report["accepted"]:
+            _pause_before_failure_close()
         return 0 if report["accepted"] else 1
     finally:
         await client.close()
