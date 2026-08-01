@@ -251,8 +251,8 @@ def test_pc_filter_snapshot_reads_dynamic_links_selects_and_inputs():
         async def eval_on_selector_all(self, selector, script):
             if selector == "a[href]":
                 return [
-                    {"text": "住宅用房", "href": "https://sf.taobao.com/list/home.htm"},
-                    {"text": "外站", "href": "https://example.com/"},
+                    {"text": "住宅用房", "href": "https://sf.taobao.com/list/home.htm", "visible": True},
+                    {"text": "外站", "href": "https://example.com/", "visible": True},
                 ]
             if selector == "select":
                 return [
@@ -271,7 +271,7 @@ def test_pc_filter_snapshot_reads_dynamic_links_selects_and_inputs():
     snapshot = asyncio.run(client._filter_options_snapshot_unlocked())
 
     assert snapshot["linkOptions"] == [
-        {"text": "住宅用房", "href": "https://sf.taobao.com/list/home.htm"}
+        {"text": "住宅用房", "href": "https://sf.taobao.com/list/home.htm", "visible": True}
     ]
     assert set(snapshot["selectDimensions"]) == {"sort", "status", "stage", "price_range"}
     assert snapshot["selectDimensions"]["status"]["options"] == ["拍卖状态", "正在进行"]
@@ -324,6 +324,34 @@ def test_pc_select_option_confirms_dynamic_page_state():
         "dimension": "sort",
         "label": "价格从低到高",
         "url": "https://sf.taobao.com/list/example.htm",
+    }
+
+
+def test_pc_choice_falls_back_to_unique_exact_same_site_link():
+    class FakePage:
+        url = "https://sf.taobao.com/item_list.htm"
+
+        async def eval_on_selector_all(self, selector, script, *args):
+            if selector == "select":
+                return []
+            if selector == "a[href]":
+                assert args == ("正在进行",)
+                return ["https://sf.taobao.com/list/status.htm?status=doing"]
+            raise AssertionError(selector)
+
+        async def goto(self, url, wait_until):
+            self.url = url
+
+    client = AliPCBrowserClient()
+    client._page = FakePage()
+
+    trace = asyncio.run(client._apply_choice_exact("正在进行", "status"))
+
+    assert trace == {
+        "dimension": "status",
+        "label": "正在进行",
+        "url": "https://sf.taobao.com/list/status.htm?status=doing",
+        "controlType": "link",
     }
 
 

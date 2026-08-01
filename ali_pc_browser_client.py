@@ -490,8 +490,12 @@ class AliPCBrowserClient:
             r"""anchors => anchors.map(a => {
                 const text = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ');
                 const rect = a.getBoundingClientRect();
-                if (!text || text.length > 40 || rect.width <= 0 || rect.height <= 0) return null;
-                return {text, href: a.href || ''};
+                if (!text || text.length > 40) return null;
+                return {
+                    text,
+                    href: a.href || '',
+                    visible: rect.width > 0 && rect.height > 0
+                };
             }).filter(Boolean)""",
         )
         link_options: list[dict] = []
@@ -508,7 +512,11 @@ class AliPCBrowserClient:
                 and key not in seen_links
             ):
                 seen_links.add(key)
-                link_options.append({"text": text, "href": href})
+                link_options.append({
+                    "text": text,
+                    "href": href,
+                    "visible": bool(entry.get("visible")),
+                })
 
         selects = await self._read_select_entries()
         dimensions: dict[str, dict] = {}
@@ -661,6 +669,24 @@ class AliPCBrowserClient:
                 )
             await self._page.wait_for_timeout(min(250, remaining_ms))
 
+    async def _apply_choice_exact(self, label: str, dimension: str) -> dict:
+        """原生 select 优先；无原生选项时只接受唯一的同站精确链接."""
+        selects = await self._read_select_entries()
+        matches = [entry for entry in selects if label in entry.get("options", [])]
+        if len(matches) == 1:
+            trace = await self._select_option_exact(label, dimension)
+            trace["controlType"] = "select"
+            return trace
+        if len(matches) > 1:
+            raise AliPCBrowserError(
+                "pc_filter_resolution_failed",
+                f"无法唯一解析{dimension}原生下拉选项: {label}",
+                {"dimension": dimension, "name": label, "match_count": len(matches)},
+            )
+        trace = await self._navigate_exact_link(label, dimension)
+        trace["controlType"] = "link"
+        return trace
+
     async def _wait_for_items(self, limit: int) -> tuple[list[dict], dict]:
         """轮询等待旧 PC 页面异步渲染拍品卡片，避免 DOMContentLoaded 过早解析."""
         assert self._page is not None
@@ -781,7 +807,7 @@ class AliPCBrowserClient:
                     ):
                         if label:
                             applied_filters.append(
-                                await self._select_option_exact(label, dimension)
+                                await self._apply_choice_exact(label, dimension)
                             )
                     target = build_pc_search_url(
                         self._page.url,

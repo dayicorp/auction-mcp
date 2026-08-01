@@ -49,8 +49,13 @@ def _pause_before_failure_close() -> None:
 def _choose_dynamic_select(snapshot: dict, dimension: str) -> str | None:
     entry = (snapshot.get("selectDimensions") or {}).get(dimension) or {}
     options = [str(option).strip() for option in entry.get("options", []) if str(option).strip()]
+    link_labels = {
+        str(link.get("text") or "").strip()
+        for link in snapshot.get("linkOptions", [])
+        if str(link.get("text") or "").strip()
+    }
     for preferred in PREFERRED_SELECT_OPTIONS[dimension]:
-        if preferred in options:
+        if preferred in options or preferred in link_labels:
             return preferred
     selected = str(entry.get("selected") or "")
     return next((option for option in options if option != selected), None)

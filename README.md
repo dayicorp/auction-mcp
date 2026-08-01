@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-103%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-104%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，已通过真实登录态 PC Live 验收
-- **123 项 pytest 测试** — 103 项离线通过 + 20 项 Live 默认跳过
+- **124 项 pytest 测试** — 104 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -176,7 +176,7 @@ auction-mcp/
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
 ├── scripts/manual_live_pc.py # 一次性交互式 PC Live 验收入口
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
-└── tests/               # 123 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
+└── tests/               # 124 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么默认链路是纯 httpx
