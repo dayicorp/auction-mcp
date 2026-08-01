@@ -177,12 +177,18 @@ def parse_pc_item_records(records: list[dict[str, Any]], limit: int = 20) -> lis
         item_id = id_match.group(1)
         seen.add(item_id)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        title = str(record.get("title") or "").strip()
-        if not title:
-            title = next(
-                (line for line in lines if not re.search(r"[¥￥]|当前价|变卖价|起拍价|开拍价|评估价|开始时间", line)),
-                "",
-            )
+        raw_title = str(record.get("title") or "").strip()
+        title_lines = [line.strip() for line in raw_title.splitlines() if line.strip()]
+        title = next(
+            (
+                line for line in title_lines + lines
+                if not re.search(
+                    r"[¥￥]|当前价|变卖价|起拍价|开拍价|评估价|开始时间|结束时间|次围观|人报名",
+                    line,
+                )
+            ),
+            "",
+        )
         items.append({
             "itemId": item_id,
             "title": title,

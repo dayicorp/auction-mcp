@@ -185,7 +185,7 @@ def test_pc_item_parser_deduplicates_and_normalizes_price_units():
     records = [
         {
             "href": "https://sf-item.taobao.com/sf_item/1061234567890.htm",
-            "title": "江门住宅一套",
+            "title": "江门住宅一套\n当前价 ￥11.3417万\n开始时间 08月14日\n8850次围观",
             "text": "江门住宅一套\n当前价 ￥11.3417万\n开始时间 08月14日",
             "image": "https://img.example/one.jpg",
         },
@@ -209,6 +209,7 @@ def test_pc_item_parser_deduplicates_and_normalizes_price_units():
     items = parse_pc_item_records(records)
 
     assert [item["itemId"] for item in items] == ["1061234567890", "1069876543210"]
+    assert items[0]["title"] == "江门住宅一套"
     assert items[0]["currentPriceYuan"] == pytest.approx(113417)
     assert items[1]["currentPriceYuan"] == pytest.approx(125_000_000)
 
