@@ -195,6 +195,89 @@ def parse_pc_item_records(records: list[dict[str, Any]], limit: int = 20) -> lis
     return items
 
 
+def evaluate_pc_live_acceptance(
+    result: dict,
+    *,
+    max_price_yuan: int,
+    auction_start_from: str,
+    auction_start_to: str,
+) -> dict:
+    """对一次真实 PC 查询做不含 Cookie/原始页面内容的结构化验收."""
+    failures: list[str] = []
+    if result.get("error"):
+        failures.append(f"query_error:{result['error']}")
+    if result.get("state") in {"login_required", "action_required", "stopped"}:
+        failures.append(f"session_state:{result['state']}")
+    if result.get("source") != "ali_pc_browser":
+        failures.append("unexpected_source")
+    if result.get("authenticated_session") is not True:
+        failures.append("authenticated_session_not_confirmed")
+
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    if not items:
+        failures.append("no_items")
+
+    missing_price_ids: list[str] = []
+    over_limit_ids: list[str] = []
+    prices: list[float] = []
+    for item in items:
+        item_id = str(item.get("itemId") or "unknown")
+        price = item.get("currentPriceYuan")
+        if not isinstance(price, (int, float)):
+            missing_price_ids.append(item_id)
+            continue
+        numeric_price = float(price)
+        prices.append(numeric_price)
+        if numeric_price > max_price_yuan:
+            over_limit_ids.append(item_id)
+    if missing_price_ids:
+        failures.append("items_missing_current_price")
+    if over_limit_ids:
+        failures.append("items_over_max_price")
+
+    query = dict(parse_qsl(urlsplit(str(result.get("url") or "")).query, keep_blank_values=True))
+    expected_query = {
+        "end_price": str(max_price_yuan),
+        "auctionStartFrom": auction_start_from,
+        "auctionStartTo": auction_start_to,
+    }
+    mismatched_query = {
+        key: {"expected": value, "actual": query.get(key)}
+        for key, value in expected_query.items()
+        if query.get(key) != value
+    }
+    if mismatched_query:
+        failures.append("verified_query_params_missing")
+
+    samples = [
+        {
+            "itemId": item.get("itemId"),
+            "title": item.get("title"),
+            "currentPriceYuan": item.get("currentPriceYuan"),
+            "url": item.get("url"),
+        }
+        for item in items[:3]
+    ]
+    return {
+        "accepted": not failures,
+        "failures": failures,
+        "evidence": {
+            "result_count": len(items),
+            "reported_count": result.get("count"),
+            "minimum_price_yuan": min(prices) if prices else None,
+            "maximum_price_yuan": max(prices) if prices else None,
+            "max_price_contract_yuan": max_price_yuan,
+            "missing_price_item_ids": missing_price_ids,
+            "over_limit_item_ids": over_limit_ids,
+            "query_params": {key: query.get(key) for key in expected_query},
+            "query_param_mismatches": mismatched_query,
+            "samples": samples,
+            "cookie_exported": False,
+            "cookie_persisted_by_adapter": False,
+        },
+    }
+
+
 class AliPCBrowserClient:
     """基于非持久化 Playwright context 的登录态 PC 查询客户端."""
 

@@ -12,6 +12,7 @@ from ali_pc_browser_client import (
     AliPCBrowserClient,
     AliPCBrowserError,
     build_pc_search_url,
+    evaluate_pc_live_acceptance,
     parse_pc_item_records,
 )
 
@@ -70,6 +71,85 @@ def test_pc_price_and_date_url_matches_verified_contract():
     assert query["auctionStartTo"] == ["2026-09-01"]
     assert query["auction_source"] == ["0"]
     assert query["st_param"] == ["-1"]
+
+
+def test_pc_live_acceptance_passes_only_verified_query_and_prices():
+    result = {
+        "source": "ali_pc_browser",
+        "count": 2,
+        "authenticated_session": True,
+        "url": (
+            "https://sf.taobao.com/list/example.htm?end_price=210000"
+            "&auctionStartFrom=2026-08-01&auctionStartTo=2026-09-01"
+        ),
+        "items": [
+            {
+                "itemId": "12345678901",
+                "title": "住宅一",
+                "currentPriceYuan": 100_360,
+                "url": "https://sf.taobao.com/item.htm?id=12345678901",
+                "rawText": "不应进入验收报告",
+            },
+            {
+                "itemId": "12345678902",
+                "title": "住宅二",
+                "currentPriceYuan": 179_030,
+                "url": "https://sf.taobao.com/item.htm?id=12345678902",
+            },
+        ],
+    }
+
+    report = evaluate_pc_live_acceptance(
+        result,
+        max_price_yuan=210_000,
+        auction_start_from="2026-08-01",
+        auction_start_to="2026-09-01",
+    )
+
+    assert report["accepted"] is True
+    assert report["failures"] == []
+    assert report["evidence"]["maximum_price_yuan"] == 179_030
+    assert "rawText" not in report["evidence"]["samples"][0]
+
+
+def test_pc_live_acceptance_rejects_over_limit_or_missing_price():
+    result = {
+        "source": "ali_pc_browser",
+        "count": 2,
+        "authenticated_session": True,
+        "url": (
+            "https://sf.taobao.com/list/example.htm?end_price=210000"
+            "&auctionStartFrom=2026-08-01&auctionStartTo=2026-09-01"
+        ),
+        "items": [
+            {"itemId": "12345678901", "currentPriceYuan": 210_001},
+            {"itemId": "12345678902", "currentPriceYuan": None},
+        ],
+    }
+
+    report = evaluate_pc_live_acceptance(
+        result,
+        max_price_yuan=210_000,
+        auction_start_from="2026-08-01",
+        auction_start_to="2026-09-01",
+    )
+
+    assert report["accepted"] is False
+    assert "items_over_max_price" in report["failures"]
+    assert "items_missing_current_price" in report["failures"]
+
+
+def test_pc_live_acceptance_rejects_error_and_wrong_query_contract():
+    report = evaluate_pc_live_acceptance(
+        {"error": "pc_result_parse_failed", "items": [], "url": "https://sf.taobao.com/"},
+        max_price_yuan=210_000,
+        auction_start_from="2026-08-01",
+        auction_start_to="2026-09-01",
+    )
+
+    assert report["accepted"] is False
+    assert "query_error:pc_result_parse_failed" in report["failures"]
+    assert "verified_query_params_missing" in report["failures"]
 
 
 @pytest.mark.parametrize(
