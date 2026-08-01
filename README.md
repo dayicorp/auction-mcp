@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-99%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-103%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间及页面动态筛选；登录/验证由用户手动完成，已通过真实登录态 PC Live 验收
-- **119 项 pytest 测试** — 99 项离线通过 + 20 项 Live 默认跳过
+- **123 项 pytest 测试** — 103 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -50,7 +50,7 @@ pytest                             # 单元 + 容错 (零网络)
 pytest --run-live                  # + 集成 (真打 Ali/JD API)
 ```
 
-## 工具 (10 个)
+## 工具 (11 个)
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
@@ -60,6 +60,7 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 | `ali_get_filter_options` | (无) | 阿里 9 个 filter 维度的完整可选项 |
 | `ali_pc_browser_start` | (无) | 启动非持久化可见 Chrome；用户手动登录或验证 |
 | `ali_pc_browser_status` | (无) | 检查 PC 会话登录/验证状态 |
+| `ali_pc_get_filter_options` | `category?`, `province?`, `city?` | 从当前真实 PC DOM 动态读取链接、下拉框和输入控件能力 |
 | `ali_pc_search_judicial` | `keyword?`, 分类/地区/资产类型/排序/状态/阶段?, 价格?, 开始日期? | [Interactive Experimental] 阿里 PC 完整筛选；关键词不可与其他筛选混用 |
 | `ali_pc_browser_close` | (无) | 关闭 PC 会话并销毁进程内登录态 |
 | `jd_search_judicial` | `province?`, `city?`, `district?`, `page=1` | [Advanced 单源] 仅查京东 |
@@ -75,6 +76,8 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 ali_pc_browser_start()
 # 用户只在弹出的 Chrome 中手动完成登录/验证码；随后检查状态
 ali_pc_browser_status()
+# 先读取当前真实页面提供的精确中文筛选值
+ali_pc_get_filter_options(category="住宅用房", province="广东", city="江门")
 
 ali_pc_search_judicial(
     category="住宅用房",
@@ -98,6 +101,14 @@ PC 适配器只使用浏览器进程内会话：不调用 Cookie 读取接口、
 ```
 
 脚本会打开一个全新的非持久化 Chrome 会话；它不会复用现有 Chrome 用户目录或读取其中的 Cookie。若页面要求登录、滑块或二维码，只需在弹出的窗口手动完成后回到终端按 Enter。脚本随后自动查询，并输出不含 Cookie 和原始页面正文的 `PC_LIVE_ACCEPTANCE` JSON。验收通过时自动关闭会话；失败时保留浏览器供人工检查，确认后按 Enter 关闭。
+
+一次登录执行 P2.5 完整筛选能力矩阵（动态能力读取 + 关键词/区县/资产类型/排序/状态/阶段）：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\manual_live_pc_matrix.py
+```
+
+矩阵只使用页面实时返回的选项，场景之间固定等待 2 秒；遇到登录、验证码、滑块、风控或任一筛选应用失败会立即停止并保留浏览器供检查。
 
 ## 用法示例
 
@@ -156,7 +167,7 @@ search_judicial(province="四川", city="成都市", district="武侯区")
 
 ```
 auction-mcp/
-├── server.py            # FastMCP server, 10 个 @mcp.tool()
+├── server.py            # FastMCP server, 11 个 @mcp.tool()
 ├── ali_h5_client.py     # 阿里 H5 mtop client + 双 vintage 解析 + 守门 + 动态学码
 ├── ali_pc_browser_client.py # 非持久化 Chrome PC 完整筛选适配器
 ├── jd_h5_client.py      # 京东 m. 版 client + 全国地区树查询
@@ -164,7 +175,8 @@ auction-mcp/
 ├── gb2260_200712.json   # GB 2260 pre-2013 (阿里 server 实际接受的 vintage)
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
 ├── scripts/manual_live_pc.py # 一次性交互式 PC Live 验收入口
-└── tests/               # 119 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
+├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
+└── tests/               # 123 项 pytest (含 PC browser / region boundary / resolve / validation / resilience / live)
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -184,6 +196,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 ## Roadmap
 
 - [ ] **阿里拍品详情** — `queryHttpsItemDetail` mtop 被 baxia 风控拦 (需 `cna + tfstk + isg` cookie). 已规划: 本机 headless Playwright 一次性预热 cookie 注入 httpx, RGV587 时自动重预热.
+- [ ] **P2.5 PC 完整筛选能力矩阵** — 动态能力读取与一次登录多场景验收入口已实现；等待真实登录态矩阵 Live 验收
 - [x] **P2.4 PC 完整筛选交互式 Live 验收** — 2026-08-01 在用户手动登录的非持久化 Chrome 会话中通过固定查询验收：20/20 条、价格 100360–195097 元、无超限或缺价项、查询参数完全匹配，Cookie 未导出或持久化
 - [x] ~~双端聚合 + 价格单位归一~~ (v2.1, 见 `search_judicial`)
 

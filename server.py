@@ -55,7 +55,8 @@ mcp = FastMCP(
         "5. search_judicial 返回每条 item 带 `platform: 'ali'|'jd'` + 归一化 `price_yuan` (元),\n"
         "   方便上层做对比. 单源原生字段也保留 (itemId / paimaiId 等).\n"
         "6. 用户明确要求阿里 PC 完整筛选 (关键词/价格/开始时间/任意状态或阶段) 时，先调用\n"
-        "   ali_pc_browser_start；用户在弹出的 Chrome 手动登录后，再调用 ali_pc_search_judicial。\n"
+        "   ali_pc_browser_start；用户在弹出的 Chrome 手动登录后，调用 ali_pc_get_filter_options\n"
+        "   读取真实页面选项，再把精确中文值传给 ali_pc_search_judicial。\n"
         "   PC 浏览器链路不读取或保存 Cookie，遇到登录/验证码/滑块必须交给用户手动完成。\n"
     ),
 )
@@ -626,6 +627,25 @@ async def ali_pc_browser_start() -> dict:
 async def ali_pc_browser_status() -> dict:
     """检查阿里 PC 浏览器会话是否已启动及是否完成用户手动登录."""
     return await ali_pc.status()
+
+
+@mcp.tool()
+async def ali_pc_get_filter_options(
+    category: str | None = None,
+    province: str | None = None,
+    city: str | None = None,
+) -> dict:
+    """从登录态阿里 PC 页面实时读取可见筛选能力，不读取或保存 Cookie.
+
+    不传参数时返回首页当前可见链接、下拉框和输入控件；可逐级提供
+    category/province/city，读取该范围内动态出现的城市、区县等选项。
+    返回值来自真实 DOM，不使用静态选项表；歧义或无法解析时 fail-closed。
+    """
+    return await ali_pc.get_filter_options(
+        category=category,
+        province=province,
+        city=city,
+    )
 
 
 @mcp.tool()

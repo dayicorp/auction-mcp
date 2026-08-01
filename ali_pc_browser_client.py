@@ -19,6 +19,12 @@ PC_KEYWORD_URL = "https://sf.taobao.com/item_list.htm"
 _PC_ALLOWED_HOST = "sf.taobao.com"
 _PUNISH_MARKERS = ("/_____tmd_____/punish", "x5secdata=")
 _VERIFICATION_MARKERS = ("安全验证", "滑动验证", "请完成验证", "请拖动滑块")
+_SELECT_DIMENSION_MARKERS = {
+    "sort": "默认排序",
+    "status": "拍卖状态",
+    "stage": "拍卖阶段",
+    "price_range": "价格区间",
+}
 
 
 class AliPCBrowserError(RuntimeError):
@@ -289,6 +295,70 @@ def evaluate_pc_live_acceptance(
     }
 
 
+def evaluate_pc_matrix_scenario(
+    name: str,
+    result: dict,
+    expected_filters: dict[str, str],
+) -> dict:
+    """验收单个 PC 能力矩阵场景，不携带原始卡片正文或浏览器凭据."""
+    failures: list[str] = []
+    if result.get("error"):
+        failures.append(f"query_error:{result['error']}")
+    if result.get("state") in {"login_required", "action_required", "stopped"}:
+        failures.append(f"session_state:{result['state']}")
+    if result.get("source") != "ali_pc_browser":
+        failures.append("unexpected_source")
+    if result.get("authenticated_session") is not True:
+        failures.append("authenticated_session_not_confirmed")
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    if not items:
+        failures.append("no_items")
+
+    applied_entries = (
+        result.get("appliedFilters")
+        if isinstance(result.get("appliedFilters"), list)
+        else []
+    )
+    applied = {
+        str(entry.get("dimension")): str(entry.get("label"))
+        for entry in applied_entries
+        if isinstance(entry, dict) and entry.get("dimension") and entry.get("label") is not None
+    }
+    mismatches = {
+        dimension: {"expected": label, "actual": applied.get(dimension)}
+        for dimension, label in expected_filters.items()
+        if applied.get(dimension) != label
+    }
+    if mismatches:
+        failures.append("applied_filter_mismatch")
+
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    return {
+        "name": name,
+        "accepted": not failures,
+        "failures": failures,
+        "evidence": {
+            "count": len(items),
+            "reported_count": result.get("count"),
+            "url": result.get("url") or diagnostics.get("url"),
+            "expected_filters": expected_filters,
+            "applied_filters": applied,
+            "filter_mismatches": mismatches,
+            "samples": [
+                {
+                    "itemId": item.get("itemId"),
+                    "title": item.get("title"),
+                    "currentPriceYuan": item.get("currentPriceYuan"),
+                    "url": item.get("url"),
+                }
+                for item in items[:2]
+            ],
+            "cookie_exported": False,
+            "cookie_persisted_by_adapter": False,
+        },
+    }
+
+
 class AliPCBrowserClient:
     """基于非持久化 Playwright context 的登录态 PC 查询客户端."""
 
@@ -397,7 +467,141 @@ class AliPCBrowserClient:
             }
         return None
 
-    async def _navigate_exact_link(self, label: str, dimension: str) -> None:
+    async def _read_select_entries(self) -> list[dict]:
+        assert self._page is not None
+        return await self._page.eval_on_selector_all(
+            "select",
+            """selects => selects.map((select, index) => ({
+                index,
+                id: select.id || null,
+                name: select.name || null,
+                className: select.className || null,
+                selected: select.selectedOptions.length
+                    ? (select.selectedOptions[0].textContent || '').trim()
+                    : null,
+                options: Array.from(select.options).map(o => (o.textContent || '').trim())
+            }))""",
+        )
+
+    async def _filter_options_snapshot_unlocked(self) -> dict:
+        assert self._page is not None
+        links = await self._page.eval_on_selector_all(
+            "a[href]",
+            r"""anchors => anchors.map(a => {
+                const text = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ');
+                const rect = a.getBoundingClientRect();
+                if (!text || text.length > 40 || rect.width <= 0 || rect.height <= 0) return null;
+                return {text, href: a.href || ''};
+            }).filter(Boolean)""",
+        )
+        link_options: list[dict] = []
+        seen_links: set[tuple[str, str]] = set()
+        for entry in links:
+            text = str(entry.get("text") or "").strip()
+            href = str(entry.get("href") or "")
+            parts = urlsplit(href)
+            key = (text, href)
+            if (
+                text
+                and parts.scheme == "https"
+                and parts.hostname == _PC_ALLOWED_HOST
+                and key not in seen_links
+            ):
+                seen_links.add(key)
+                link_options.append({"text": text, "href": href})
+
+        selects = await self._read_select_entries()
+        dimensions: dict[str, dict] = {}
+        for entry in selects:
+            options = [str(option).strip() for option in entry.get("options", []) if str(option).strip()]
+            for dimension, marker in _SELECT_DIMENSION_MARKERS.items():
+                if marker in options and dimension not in dimensions:
+                    dimensions[dimension] = {
+                        "index": entry.get("index"),
+                        "selected": entry.get("selected"),
+                        "options": options,
+                    }
+
+        controls = await self._page.eval_on_selector_all(
+            "input",
+            """inputs => inputs.map((input, index) => ({
+                index,
+                type: input.type || 'text',
+                name: input.name || null,
+                placeholder: input.placeholder || null,
+                valuePresent: Boolean(input.value)
+            }))""",
+        )
+        return {
+            "state": "ready",
+            "url": self._page.url,
+            "linkOptionCount": len(link_options),
+            "linkOptions": link_options,
+            "selectDimensions": dimensions,
+            "unclassifiedSelects": [
+                entry for entry in selects
+                if entry.get("index") not in {
+                    dimension.get("index") for dimension in dimensions.values()
+                }
+            ],
+            "inputControls": controls,
+            "cookie_policy": "browser_memory_only",
+            "cookie_exported": False,
+            "cookie_persisted_by_adapter": False,
+        }
+
+    async def get_filter_options(
+        self,
+        *,
+        category: str | None = None,
+        province: str | None = None,
+        city: str | None = None,
+    ) -> dict:
+        """从当前真实 PC DOM 动态读取链接、下拉框和输入控件能力."""
+        lock = await self._locked()
+        async with lock:
+            if not self._page or self._page.is_closed():
+                return {
+                    "error": "pc_browser_not_started",
+                    "message": "请先调用 ali_pc_browser_start，并在打开的 Chrome 窗口完成登录",
+                }
+            session = await self._status_unlocked()
+            if session.get("state") != "ready":
+                return session
+            if city and not province:
+                return AliPCBrowserError(
+                    "pc_filter_validation_failed",
+                    "读取城市下级能力时必须同时提供 province",
+                ).as_dict()
+            try:
+                await self._page.goto(PC_HOME_URL, wait_until="domcontentloaded")
+                trace: list[dict] = []
+                for label, dimension in (
+                    (category, "category"),
+                    (province, "province"),
+                    (city, "city"),
+                ):
+                    if label:
+                        trace.append(await self._navigate_exact_link(label, dimension))
+                title = await self._page.title()
+                body = await self._page.locator("body").inner_text(timeout=self.timeout_ms)
+                action = self._action_required(self._page.url, title, body)
+                if action:
+                    return action
+                snapshot = await self._filter_options_snapshot_unlocked()
+                snapshot["scope"] = {"category": category, "province": province, "city": city}
+                snapshot["appliedFilters"] = trace
+                return snapshot
+            except AliPCBrowserError as exc:
+                return exc.as_dict()
+            except Exception as exc:
+                return {
+                    "error": "pc_filter_options_failed",
+                    "message": str(exc),
+                    "diagnostics": {"url": self._page.url if self._page else None},
+                }
+
+    async def _navigate_exact_link(self, label: str, dimension: str) -> dict:
         assert self._page is not None
         hrefs = await self._page.eval_on_selector_all(
             "a[href]",
@@ -423,16 +627,11 @@ class AliPCBrowserClient:
                 },
             )
         await self._page.goto(urljoin(self._page.url, unique[0]), wait_until="domcontentloaded")
+        return {"dimension": dimension, "label": label, "url": self._page.url}
 
-    async def _select_option_exact(self, label: str, dimension: str) -> None:
+    async def _select_option_exact(self, label: str, dimension: str) -> dict:
         assert self._page is not None
-        selects = await self._page.eval_on_selector_all(
-            "select",
-            """selects => selects.map((select, index) => ({
-                index,
-                options: Array.from(select.options).map(o => (o.textContent || '').trim())
-            }))""",
-        )
+        selects = await self._read_select_entries()
         matches = [entry for entry in selects if label in entry["options"]]
         if len(matches) != 1:
             raise AliPCBrowserError(
@@ -447,6 +646,20 @@ class AliPCBrowserClient:
         except Exception:
             # 部分旧页面 change 事件只做同步跳转；后续状态检查负责判定结果。
             pass
+        deadline = asyncio.get_running_loop().time() + min(5, self.timeout_ms / 1000)
+        while True:
+            current = await self._read_select_entries()
+            selected_matches = [entry for entry in current if entry.get("selected") == label]
+            if len(selected_matches) == 1:
+                return {"dimension": dimension, "label": label, "url": self._page.url}
+            remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
+            if remaining_ms <= 0:
+                raise AliPCBrowserError(
+                    "pc_filter_application_failed",
+                    f"页面未确认已应用{dimension}选项: {label}",
+                    {"dimension": dimension, "name": label, "url": self._page.url},
+                )
+            await self._page.wait_for_timeout(min(250, remaining_ms))
 
     async def _wait_for_items(self, limit: int) -> tuple[list[dict], dict]:
         """轮询等待旧 PC 页面异步渲染拍品卡片，避免 DOMContentLoaded 过早解析."""
@@ -539,10 +752,16 @@ class AliPCBrowserClient:
                         "关键词搜索会清空其他 PC 筛选，当前不支持组合",
                     )
 
+                applied_filters: list[dict] = []
                 await self._page.goto(PC_HOME_URL, wait_until="domcontentloaded")
                 if keyword:
                     target = build_pc_search_url(keyword=keyword)
                     await self._page.goto(target, wait_until="domcontentloaded")
+                    applied_filters.append({
+                        "dimension": "keyword",
+                        "label": keyword,
+                        "url": self._page.url,
+                    })
                 else:
                     for label, dimension in (
                         (category, "category"),
@@ -552,14 +771,18 @@ class AliPCBrowserClient:
                         (asset_type, "asset_type"),
                     ):
                         if label:
-                            await self._navigate_exact_link(label, dimension)
+                            applied_filters.append(
+                                await self._navigate_exact_link(label, dimension)
+                            )
                     for label, dimension in (
                         (sort, "sort"),
                         (status, "status"),
                         (stage, "stage"),
                     ):
                         if label:
-                            await self._select_option_exact(label, dimension)
+                            applied_filters.append(
+                                await self._select_option_exact(label, dimension)
+                            )
                     target = build_pc_search_url(
                         self._page.url,
                         min_price_yuan=min_price_yuan,
@@ -569,6 +792,18 @@ class AliPCBrowserClient:
                     )
                     if target != self._page.url:
                         await self._page.goto(target, wait_until="domcontentloaded")
+                    for dimension, label in (
+                        ("min_price_yuan", min_price_yuan),
+                        ("max_price_yuan", max_price_yuan),
+                        ("auction_start_from", auction_start_from),
+                        ("auction_start_to", auction_start_to),
+                    ):
+                        if label is not None:
+                            applied_filters.append({
+                                "dimension": dimension,
+                                "label": str(label),
+                                "url": self._page.url,
+                            })
 
                 title = await self._page.title()
                 body = await self._page.locator("body").inner_text(timeout=self.timeout_ms)
@@ -589,6 +824,7 @@ class AliPCBrowserClient:
                                 r"当前价|变卖价|起拍价|开拍价|评估价|开始时间",
                                 final_body,
                             )),
+                            "appliedFilters": applied_filters,
                             **parse_diagnostics,
                         },
                     }
@@ -597,6 +833,7 @@ class AliPCBrowserClient:
                     "count": len(items),
                     "items": items,
                     "url": self._page.url,
+                    "appliedFilters": applied_filters,
                     "authenticated_session": True,
                     "cookie_policy": "browser_memory_only",
                 }

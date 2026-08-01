@@ -13,6 +13,7 @@ from ali_pc_browser_client import (
     AliPCBrowserError,
     build_pc_search_url,
     evaluate_pc_live_acceptance,
+    evaluate_pc_matrix_scenario,
     parse_pc_item_records,
 )
 
@@ -241,6 +242,107 @@ def test_pc_wait_for_items_polls_until_dynamic_cards_render():
     assert items[0]["currentPriceYuan"] == pytest.approx(100_360)
     assert diagnostics == {"poll_attempts": 2, "candidate_record_count": 1}
     assert client._page.waits == [500]
+
+
+def test_pc_filter_snapshot_reads_dynamic_links_selects_and_inputs():
+    class FakePage:
+        url = "https://sf.taobao.com/"
+
+        async def eval_on_selector_all(self, selector, script):
+            if selector == "a[href]":
+                return [
+                    {"text": "住宅用房", "href": "https://sf.taobao.com/list/home.htm"},
+                    {"text": "外站", "href": "https://example.com/"},
+                ]
+            if selector == "select":
+                return [
+                    {"index": 0, "selected": "默认排序", "options": ["默认排序", "价格从低到高"]},
+                    {"index": 1, "selected": "拍卖状态", "options": ["拍卖状态", "正在进行"]},
+                    {"index": 2, "selected": "拍卖阶段", "options": ["拍卖阶段", "一拍"]},
+                    {"index": 3, "selected": "价格区间", "options": ["价格区间", "21万以下"]},
+                ]
+            if selector == "input":
+                return [{"index": 0, "type": "text", "name": "auctionStart", "valuePresent": False}]
+            raise AssertionError(selector)
+
+    client = AliPCBrowserClient()
+    client._page = FakePage()
+
+    snapshot = asyncio.run(client._filter_options_snapshot_unlocked())
+
+    assert snapshot["linkOptions"] == [
+        {"text": "住宅用房", "href": "https://sf.taobao.com/list/home.htm"}
+    ]
+    assert set(snapshot["selectDimensions"]) == {"sort", "status", "stage", "price_range"}
+    assert snapshot["selectDimensions"]["status"]["options"] == ["拍卖状态", "正在进行"]
+    assert snapshot["cookie_exported"] is False
+    assert snapshot["cookie_persisted_by_adapter"] is False
+
+
+def test_pc_filter_options_requires_started_browser():
+    result = asyncio.run(AliPCBrowserClient().get_filter_options())
+    assert result["error"] == "pc_browser_not_started"
+
+
+def test_pc_select_option_confirms_dynamic_page_state():
+    class FakeLocator:
+        def __init__(self, page):
+            self.page = page
+
+        def nth(self, index):
+            assert index == 0
+            return self
+
+        async def select_option(self, label):
+            self.page.selected = label
+
+    class FakePage:
+        url = "https://sf.taobao.com/list/example.htm"
+        selected = "默认排序"
+
+        async def eval_on_selector_all(self, selector, script):
+            assert selector == "select"
+            return [{
+                "index": 0,
+                "selected": self.selected,
+                "options": ["默认排序", "价格从低到高"],
+            }]
+
+        def locator(self, selector):
+            assert selector == "select"
+            return FakeLocator(self)
+
+        async def wait_for_load_state(self, state, timeout):
+            return None
+
+    client = AliPCBrowserClient()
+    client._page = FakePage()
+
+    trace = asyncio.run(client._select_option_exact("价格从低到高", "sort"))
+
+    assert trace == {
+        "dimension": "sort",
+        "label": "价格从低到高",
+        "url": "https://sf.taobao.com/list/example.htm",
+    }
+
+
+def test_pc_matrix_scenario_requires_matching_application_receipt():
+    result = {
+        "source": "ali_pc_browser",
+        "count": 1,
+        "authenticated_session": True,
+        "url": "https://sf.taobao.com/list/example.htm",
+        "appliedFilters": [{"dimension": "status", "label": "正在进行"}],
+        "items": [{"itemId": "1061234567890", "title": "住宅", "currentPriceYuan": 100_000}],
+    }
+
+    accepted = evaluate_pc_matrix_scenario("status", result, {"status": "正在进行"})
+    rejected = evaluate_pc_matrix_scenario("status", result, {"status": "已结束"})
+
+    assert accepted["accepted"] is True
+    assert rejected["accepted"] is False
+    assert rejected["failures"] == ["applied_filter_mismatch"]
 
 
 def test_pc_search_requires_started_browser():
