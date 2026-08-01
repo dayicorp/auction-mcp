@@ -285,3 +285,44 @@ def test_invalid_city_fail_closed_guard(monkeypatch):
     assert result.get("error") == "region_resolution_failed"
     assert result["diagnostics"]["resolution"] == "city"
     assert ali_calls["count"] == 0
+
+
+# ============================================================ Ali Advanced filter 透传
+
+
+def test_ali_search_passes_zc_biz_types_to_provider(monkeypatch):
+    """公开 Ali Advanced 工具应原样透传资产类型编码列表."""
+    import server
+
+    captured: dict[str, Any] = {}
+
+    def fake_search_judicial(**kwargs):
+        captured.update(kwargs)
+        return _make_ali_success_response([])
+
+    monkeypatch.setattr(server.ali, "search_judicial", fake_search_judicial)
+
+    result = server.ali_search_judicial(zc_biz_types=["1", "7"])
+
+    assert result.get("error") is None
+    assert captured["zc_biz_types"] == ["1", "7"]
+
+
+def test_ali_client_serializes_zc_biz_types_filter(monkeypatch):
+    """Ali client 应把资产类型编码序列化为 mtop filter 的 zcBizTypes."""
+    from ali_h5_client import AliH5Client
+
+    client = AliH5Client()
+    captured: dict[str, Any] = {}
+
+    def fake_call_mtop(api, version, data, method="POST"):
+        captured.update({"api": api, "version": version, "data": data, "method": method})
+        return {"ret": ["SUCCESS::调用成功"]}
+
+    monkeypatch.setattr(client, "call_mtop", fake_call_mtop)
+
+    client.search_judicial(zc_biz_types=["1", "7"])
+
+    df_variables = json.loads(captured["data"]["dfVariables"])
+    filters = json.loads(df_variables["context"]["_c_searchlistsf-items"])
+    assert filters["zcBizTypes"] == ["1", "7"]
