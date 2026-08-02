@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-163%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-166%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
-- **183 项 pytest 测试** — 163 项离线通过 + 20 项 Live 默认跳过
+- **186 项 pytest 测试** — 166 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -52,7 +52,7 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 
 ### 自动化 CI 与本地发布门禁
 
-GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行同一套离线发布门禁，矩阵覆盖 Windows/Linux 与 Python 3.10、3.12、3.14。工作流权限固定为 `contents: read`，同一分支的新运行会取消旧运行，每个矩阵任务最多执行 20 分钟。
+GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行同一套离线发布门禁，矩阵覆盖 Windows/Linux 与 Python 3.10、3.12、3.14。工作流权限固定为 `contents: read`，同一分支的新运行会取消旧运行，每个矩阵任务最多执行 20 分钟。所有外部 Action 固定到40位不可变提交 SHA，checkout 不保留Git凭据；Dependabot每周检查GitHub Actions和根目录Python依赖，最多同时提出5个更新PR。
 
 本地执行与 CI 完全相同的核心验收：
 
@@ -60,7 +60,7 @@ GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行同一套
 python scripts/verify_release.py
 ```
 
-该脚本使用当前 Python 解释器完成所有受 Git 跟踪的 Python 文件编译、精确 12 个 MCP 工具注册、依赖版本契约、敏感信息与禁止产物扫描，并运行全部离线 pytest。脚本会清空外部 `PYTEST_ADDOPTS`，不会传入 `--run-live`，不会启动浏览器，也不会读取、导出或保存 Cookie。
+该脚本使用当前 Python 解释器完成所有受 Git 跟踪的 Python 文件编译、精确 12 个 MCP 工具注册、依赖版本契约、敏感信息与禁止产物扫描、Action不可变SHA检查，并运行全部离线 pytest。脚本会清空外部 `PYTEST_ADDOPTS`，不会传入 `--run-live`，不会启动浏览器，也不会读取、导出或保存 Cookie。
 
 ## 工具 (12 个)
 
@@ -219,7 +219,7 @@ auction-mcp/
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
 ├── scripts/manual_live_pc_pagination.py # 人工确认关闭的 PC 分页协议发现
 ├── scripts/manual_live_pc_page2.py # 正式 page=2 交互式 PC Live 验收
-└── tests/               # 183 项 pytest (163 项离线 + 20 项 Live 默认跳过)
+└── tests/               # 186 项 pytest (166 项离线 + 20 项 Live 默认跳过)
 ```
 
 ### 为什么默认链路是纯 httpx

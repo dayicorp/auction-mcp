@@ -86,6 +86,23 @@ def test_release_gate_pytest_command_is_offline_only():
     assert command[1:4] == ["-m", "pytest", "-q"]
 
 
+def test_release_gate_rejects_mutable_action_references():
+    workflow = """
+steps:
+  - uses: actions/checkout@v7
+  - uses: owner/local-action@0123456789abcdef0123456789abcdef01234567
+  - uses: ./local-action
+  - uses: docker://python:3.14
+"""
+    assert release_gate.unpinned_action_uses(workflow) == ["actions/checkout@v7"]
+
+
+def test_repository_actions_are_pinned_to_immutable_commits():
+    assert release_gate.verify_github_actions_pinned(
+        [PurePosixPath(".github/workflows/ci.yml")]
+    ) == 1
+
+
 def test_ci_workflow_covers_full_cross_platform_matrix_and_gate():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
@@ -100,8 +117,29 @@ def test_ci_workflow_covers_full_cross_platform_matrix_and_gate():
     assert "windows-latest" in workflow
     for version in ('"3.10"', '"3.12"', '"3.14"'):
         assert version in workflow
-    assert "actions/checkout@v7" in workflow
-    assert "actions/setup-python@v7" in workflow
+    assert (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        in workflow
+    )
+    assert (
+        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+        in workflow
+    )
+    assert "persist-credentials: false" in workflow
+    assert "PIP_NO_INPUT: \"1\"" in workflow
+    assert "actions/checkout@v7" not in workflow
+    assert "actions/setup-python@v7" not in workflow
     assert "python scripts/verify_release.py" in workflow
     assert "--run-live" not in workflow
     assert "secrets." not in workflow
+
+
+def test_dependabot_tracks_actions_and_python_dependencies_only():
+    config = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+
+    assert config.count("package-ecosystem:") == 2
+    assert "package-ecosystem: github-actions" in config
+    assert "package-ecosystem: pip" in config
+    assert config.count("interval: weekly") == 2
+    assert config.count("target-branch: main") == 2
+    assert config.count("open-pull-requests-limit: 5") == 2

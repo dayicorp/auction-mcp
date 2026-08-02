@@ -80,6 +80,12 @@ SENSITIVE_PATTERNS = {
     "cn_mobile_number": re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
 }
 
+ACTION_USE_PATTERN = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*([^#\s]+)",
+    re.MULTILINE,
+)
+FULL_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+
 
 class VerificationError(RuntimeError):
     """Raised when a release contract is not satisfied."""
@@ -222,6 +228,44 @@ def scan_sensitive_text(paths: Iterable[PurePosixPath]) -> None:
         raise VerificationError(f"sensitive text detected: {findings!r}")
 
 
+def unpinned_action_uses(text: str) -> list[str]:
+    """Return external GitHub Action references that are not immutable SHAs."""
+    failures: list[str] = []
+    for action_ref in ACTION_USE_PATTERN.findall(text):
+        if action_ref.startswith("./") or action_ref.startswith("docker://"):
+            continue
+        if "@" not in action_ref:
+            failures.append(action_ref)
+            continue
+        revision = action_ref.rsplit("@", 1)[1]
+        if not FULL_COMMIT_SHA_PATTERN.fullmatch(revision):
+            failures.append(action_ref)
+    return failures
+
+
+def verify_github_actions_pinned(paths: Iterable[PurePosixPath]) -> int:
+    workflows = sorted(
+        path
+        for path in paths
+        if len(path.parts) >= 3
+        and path.parts[:2] == (".github", "workflows")
+        and path.suffix.lower() in {".yaml", ".yml"}
+    )
+    if not workflows:
+        raise VerificationError("no tracked GitHub Actions workflows found")
+
+    failures: list[str] = []
+    for relative in workflows:
+        text = (ROOT / Path(*relative.parts)).read_text(encoding="utf-8")
+        failures.extend(
+            f"{relative}:{action_ref}"
+            for action_ref in unpinned_action_uses(text)
+        )
+    if failures:
+        raise VerificationError(f"unpinned GitHub Actions: {failures!r}")
+    return len(workflows)
+
+
 async def _registered_tool_names() -> set[str]:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -269,6 +313,9 @@ def main() -> int:
 
         scan_sensitive_text(paths)
         print("[PASS] sensitive information scan")
+
+        workflow_count = verify_github_actions_pinned(paths)
+        print(f"[PASS] immutable GitHub Actions ({workflow_count} workflows)")
 
         versions = verify_dependency_contract()
         rendered_versions = ", ".join(
