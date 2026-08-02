@@ -41,6 +41,8 @@ EXPECTED_MCP_TOOLS = {
     "search_judicial",
 }
 
+MCP_STDIO_STARTUP_TIMEOUT_SECONDS = 30.0
+
 FORBIDDEN_PATH_PARTS = {
     ".pytest_cache",
     ".mypy_cache",
@@ -286,6 +288,52 @@ def verify_mcp_tools() -> set[str]:
     return actual
 
 
+async def _stdio_registered_tool_names() -> set[str]:
+    """Start the real MCP entrypoint and list its tools over stdio."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[str(ROOT / "server.py")],
+        cwd=ROOT,
+    )
+    with open(os.devnull, "w", encoding="utf-8") as errlog:
+        async with stdio_client(parameters, errlog=errlog) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+    return {tool.name for tool in tools.tools}
+
+
+def verify_mcp_stdio_startup(
+    timeout_seconds: float = MCP_STDIO_STARTUP_TIMEOUT_SECONDS,
+) -> set[str]:
+    """Verify process startup, MCP initialization, and the public tool manifest."""
+    try:
+        actual = asyncio.run(
+            asyncio.wait_for(
+                _stdio_registered_tool_names(), timeout=timeout_seconds
+            )
+        )
+    except asyncio.TimeoutError as exc:
+        raise VerificationError(
+            f"MCP stdio startup timed out after {timeout_seconds:g}s"
+        ) from exc
+    except Exception as exc:
+        raise VerificationError(
+            f"MCP stdio startup failed: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if actual != EXPECTED_MCP_TOOLS:
+        raise VerificationError(
+            "MCP stdio tool registry mismatch: "
+            f"missing={sorted(EXPECTED_MCP_TOOLS - actual)!r}, "
+            f"unexpected={sorted(actual - EXPECTED_MCP_TOOLS)!r}"
+        )
+    return actual
+
+
 def offline_pytest_command() -> list[str]:
     return [
         sys.executable,
@@ -328,6 +376,12 @@ def main() -> int:
 
         tools = verify_mcp_tools()
         print(f"[PASS] MCP registry ({len(tools)} exact tools)")
+
+        stdio_tools = verify_mcp_stdio_startup()
+        print(
+            "[PASS] MCP stdio startup "
+            f"(initialize + {len(stdio_tools)} exact tools)"
+        )
 
         run_offline_tests()
         print("[PASS] full offline pytest suite")

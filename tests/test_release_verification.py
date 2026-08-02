@@ -41,6 +41,40 @@ def test_release_gate_has_exact_public_mcp_manifest():
     }
 
 
+def test_release_gate_starts_real_stdio_server_and_lists_exact_tools():
+    assert (
+        release_gate.verify_mcp_stdio_startup()
+        == release_gate.EXPECTED_MCP_TOOLS
+    )
+
+
+def test_release_gate_stdio_startup_timeout_fails_closed(monkeypatch):
+    async def never_ready():
+        import asyncio
+
+        await asyncio.sleep(1)
+        return release_gate.EXPECTED_MCP_TOOLS
+
+    monkeypatch.setattr(release_gate, "_stdio_registered_tool_names", never_ready)
+
+    with pytest.raises(release_gate.VerificationError, match="timed out"):
+        release_gate.verify_mcp_stdio_startup(timeout_seconds=0.01)
+
+
+def test_release_gate_stdio_tool_drift_fails_closed(monkeypatch):
+    async def incomplete_manifest():
+        return {"search_judicial"}
+
+    monkeypatch.setattr(
+        release_gate, "_stdio_registered_tool_names", incomplete_manifest
+    )
+
+    with pytest.raises(
+        release_gate.VerificationError, match="stdio tool registry mismatch"
+    ):
+        release_gate.verify_mcp_stdio_startup()
+
+
 def test_release_gate_dependency_contract_matches_repository():
     assert release_gate._normalized_requirements() == {
         "mcp>=1.0,<2",
