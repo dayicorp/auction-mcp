@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-151%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-152%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
-- **171 项 pytest 测试** — 151 项离线通过 + 20 项 Live 默认跳过
+- **172 项 pytest 测试** — 152 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -45,7 +45,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```
 
 ```bash
-pip install -r requirements.txt    # mcp, httpx, playwright, pytest
+pip install -r requirements.txt    # mcp 1.x, httpx, playwright, pytest
 pytest                             # 单元 + 容错 (零网络)
 pytest --run-live                  # + 集成 (真打 Ali/JD API)
 ```
@@ -224,6 +224,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 
 ## Roadmap
 
+- [x] **P2.13-A 远端消费端依赖修正** — 2026-08-02 在全新 Python 3.14.6 环境中发现 `mcp>=1.0` 会解析到不兼容的 MCP 2.0（已移除 `mcp.server.fastmcp`）；依赖范围收紧为 `mcp>=1.0,<2`，并增加发布依赖契约测试，防止干净安装再次跨越不兼容主版本
 - [x] **P2.9-F PC 拍品详情状态修正后 Live 复验** — 2026-08-01 在加载 `84f96b6` 的新非持久化登录会话中，对标的 `1062507630078` 唯一一次正式调用通过：状态规范化为“即将开始”，起拍价、评估价、保证金、加价幅度、拍卖阶段、两个周期、联系人、正文和固定详情 URL 均与真实页面一致，金额、状态、周期、正文、附件和 URL 六项 ready 门禁全部通过；Cookie 未读取、导出或保存，会话关闭后临时配置目录已清理
 - [x] **P2.9-E PC 拍品详情状态语义修正** — 2026-08-01 将真实可见“距开始/距离开始/距开拍/即将开拍”严格规范化为“即将开始”，将“距结束/距离结束”规范化为“正在进行”；只有日期、裸倒计时数字或“即将”等歧义文本继续 fail-closed。151 项离线测试通过，20 项 Live 保持跳过
 - [x] **P2.9-D PC 拍品详情修正后 Live（验收 FAIL）** — 2026-08-01 唯一一次调用中金额、周期、正文、附件和 URL 五项 ready 门禁均通过，仅 `status_ready=false`；工具正确返回 `pc_detail_content_not_ready`，没有再次输出半完整详情或假通过
