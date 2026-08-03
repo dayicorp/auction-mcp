@@ -27,6 +27,7 @@ from ali_h5_client import (
     validate_location_scoped, derive_ali_scope_prefix, GB2260,
 )
 from ali_pc_browser_client import AliPCBrowserClient
+from beike_browser_client import BeikeBrowserClient
 from jd_h5_client import JDH5Client, JD_AREAS, resolve_jd_region
 from safety_core import area_structure_error, ali_city_resolution_allowed
 
@@ -70,6 +71,9 @@ jd = JDH5Client()
 
 # 阿里 PC 浏览器 client (lazy start; 非持久化 context，不导出或保存 Cookie)
 ali_pc = AliPCBrowserClient()
+
+# 江门贝壳小区 Provider (仅附加现有本机 CDP 页面，不启动或关闭浏览器)
+beike = BeikeBrowserClient()
 
 # ============================================================ 共享地区层级验证
 
@@ -897,6 +901,39 @@ def jd_get_supported_areas(province: str | None = None,
         "district_count": len(c["counties"]),
         "districts": list(c["counties"].keys()),
     }
+
+
+# ============================================================ tools: 江门贝壳小区市场 (现有 CDP 会话)
+
+@mcp.tool()
+async def beike_browser_status() -> dict:
+    """检查现有江门贝壳 CDP 页面状态，不读取 Cookie、Token 或浏览器存储."""
+    return await beike.status()
+
+
+@mcp.tool()
+async def beike_search_xiaoqu(city: str, keyword: str) -> dict:
+    """搜索江门贝壳标准小区候选；只返回候选，由调用方决定是否匹配.
+
+    Args:
+        city: 当前只支持 ``江门市``（兼容 ``江门``）.
+        keyword: 1 至 64 个可见字符的小区关键词.
+    """
+    return await beike.search_xiaoqu(city, keyword)
+
+
+@mcp.tool()
+async def beike_get_xiaoqu_market(
+    city: str, xiaoqu_id: str, limit: int = 30
+) -> dict:
+    """读取江门贝壳小区详情及第一主挂牌列表，严格排除 VIEWDATA 推荐区.
+
+    Args:
+        city: 当前只支持 ``江门市``（兼容 ``江门``）.
+        xiaoqu_id: 搜索候选返回的 10 至 20 位纯数字小区 ID.
+        limit: 返回挂牌上限，范围 1 至 30.
+    """
+    return await beike.get_xiaoqu_market(city, xiaoqu_id, limit)
 
 
 # ============================================================ entry

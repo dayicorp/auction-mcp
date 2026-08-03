@@ -64,6 +64,22 @@
         "zc_biz_types": {"default": null, "nullable": true, "required": false, "type": "array[string]"}
       }
     },
+    "beike_browser_status": {
+      "parameters": {}
+    },
+    "beike_get_xiaoqu_market": {
+      "parameters": {
+        "city": {"nullable": false, "required": true, "type": "string"},
+        "limit": {"default": 30, "nullable": false, "required": false, "type": "integer"},
+        "xiaoqu_id": {"nullable": false, "required": true, "type": "string"}
+      }
+    },
+    "beike_search_xiaoqu": {
+      "parameters": {
+        "city": {"nullable": false, "required": true, "type": "string"},
+        "keyword": {"nullable": false, "required": true, "type": "string"}
+      }
+    },
     "jd_get_supported_areas": {
       "parameters": {
         "city": {"default": null, "nullable": true, "required": false, "type": "string"},

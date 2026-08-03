@@ -39,6 +39,7 @@ SOURCE_FILES = (
     "README.md",
     "ali_h5_client.py",
     "ali_pc_browser_client.py",
+    "beike_browser_client.py",
     "auction_mcp_assets/__init__.py",
     "auction_mcp_assets/gb2260.json",
     "auction_mcp_assets/gb2260_200712.json",
@@ -55,6 +56,7 @@ SOURCE_FILES = (
 RUNTIME_MODULES = {
     "ali_h5_client.py",
     "ali_pc_browser_client.py",
+    "beike_browser_client.py",
     "jd_h5_client.py",
     "safety_core.py",
     "server.py",

@@ -1,0 +1,25 @@
+{
+  "evidence": {
+    "source": "Claw workspace Beike samples",
+    "captured_on": "2026-07-19",
+    "live_data": false
+  },
+  "jianghai_garden": {
+    "xiaoqu_id": "8895132280985217",
+    "listing_count": 16,
+    "unit_prices_yuan": [6370, 6549, 6651, 5840, 5664, 5744, 7612, 7556, 6242, 5665, 6077, 5475, 6448, 6970, 4470, 6930],
+    "median_unit_price_yuan": 6306
+  },
+  "aoyuan_waitan": {
+    "xiaoqu_id": "8895134879236907",
+    "listing_count": 30,
+    "unit_prices_yuan": [8551, 8674, 10000, 7135, 6897, 8949, 12117, 6212, 8680, 10425, 7597, 10170, 8408, 10531, 7973, 12593, 8207, 8479, 8164, 7777, 9053, 7575, 8416, 9303, 10509, 6912, 10005, 7293, 8621, 8473],
+    "median_unit_price_yuan": 8515
+  },
+  "chengnan_wufu": {
+    "keyword": "城南五福村",
+    "candidate_count": 0,
+    "replacement_allowed": false,
+    "expected_status": "NO_MATCH"
+  }
+}

@@ -328,6 +328,13 @@ async def run_probe(
                             await session.call_tool("ali_pc_browser_status", {}),
                             "ali_pc_browser_status",
                         )
+                        beike_boundary = _json_tool_result(
+                            await session.call_tool(
+                                "beike_search_xiaoqu",
+                                {"city": "广州市", "keyword": "离线边界"},
+                            ),
+                            "beike_search_xiaoqu",
+                        )
                         missing_item_id = await session.call_tool(
                             "ali_pc_get_item_detail", {}
                         )
@@ -363,6 +370,8 @@ async def run_probe(
         "cookie_policy": "browser_memory_only",
     }:
         raise ConsumerProbeError("consumer probe unexpectedly touched browser state")
+    if (beike_boundary.get("error") or {}).get("code") != "BEIKE_UNSUPPORTED_CITY":
+        raise ConsumerProbeError("Beike unsupported-city boundary drifted")
     if not missing_item_id.isError:
         raise ConsumerProbeError("missing required item_id did not fail validation")
     if len(stderr_data) > MAX_STDERR_BYTES:
@@ -393,7 +402,7 @@ async def run_probe(
         "distribution": "installed-wheel" if installed else "source-checkout",
         "mcp_protocol": initialized.protocolVersion,
         "network_blocked": True,
-        "offline_calls": 5,
+        "offline_calls": 6,
         "server_outside_source_checkout": (
             server_origin != repo_root and repo_root not in server_origin.parents
         ),

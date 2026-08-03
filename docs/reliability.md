@@ -96,13 +96,13 @@ python scripts/verify_artifact.py
 源码白名单创建两个互不复用的构建树。仓库内 PEP 517 后端固定 sdist 的
 gzip/tar 时间、uid/gid、用户名、权限和成员顺序；wheel 与 sdist 的文件名和
 SHA-256 必须分别一致。归档不得包含 tests、scripts、Live、缓存、浏览器状态或密钥类文件。
-wheel 必须包含五个运行模块、四份 JSON 资源、MIT 许可证、Python >=3.10
+wheel 必须包含六个运行模块、四份 JSON 资源、MIT 许可证、Python >=3.10
 元数据、三项运行依赖以及唯一 `auction-mcp = server:main` 入口。
 
 构建审计后，门禁创建第三个 venv，直接安装 wheel 及其声明依赖并运行
 `pip check`。安装后的 `server` 与 `auction_mcp_assets` 必须来自该 venv，不能
 回退到源码仓库；随后从外部 cwd 调用控制台入口，在 socket 强制断网下完成真实
-MCP initialize、tools/list、12工具 Schema、五个安全调用、stderr 和异常/超时
+MCP initialize、tools/list、15工具 Schema、六个安全调用、stderr 和异常/超时
 回收检查。
 
 常见错误：
