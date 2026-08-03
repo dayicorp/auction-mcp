@@ -65,7 +65,10 @@ def test_runtime_stress_contains_no_sleep_based_soak():
     assert "sequential < 100" in source
     assert "workers < 8" in source
     assert "per_worker < 20" in source
+    assert "CHAOS_RESPONSE_TIMEOUT_SECONDS = 30.0" in source
     assert "CHAOS_EXIT_TIMEOUT_SECONDS = 10.0" in source
+    assert "PROCESS_REAP_TIMEOUT_SECONDS = 1.0" in source
+    assert gate.initialize.__kwdefaults__["timeout"] == 30.0
 
 
 def test_parent_process_resource_counter_is_available():
@@ -74,5 +77,34 @@ def test_parent_process_resource_counter_is_available():
     assert value > 0
 
 
-def test_process_tree_check_has_no_false_positive_for_impossible_parent():
-    assert gate._lingering_child_processes({sys.maxsize}) == set()
+def test_process_containment_does_not_use_parent_pid_snapshots():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "CreateToolhelp32Snapshot" not in source
+    assert "CreateJobObjectW" in source
+    assert "QueryInformationJobObject" in source
+
+
+def test_platform_process_containment_is_operational():
+    if gate.os.name != "nt":
+        # Stay inside pid_t so Linux reaches the intended ESRCH path.
+        assert gate._lingering_process_groups({2_147_483_647}) == set()
+        return
+
+    job = gate._WindowsJob()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        job.assign(process)
+        assert job.active_processes() == 1
+        assert job.active_process_ids() == (process.pid,)
+        assert process.stdin is not None
+        process.stdin.close()
+        assert process.wait(timeout=10) == 0
+        assert job.wait_for_empty(timeout=1.0) == ()
+    finally:
+        job.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)

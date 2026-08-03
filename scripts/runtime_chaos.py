@@ -15,6 +15,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,9 @@ EXPECTED_TOOLS = {
 PROTOCOL_VERSION = "2025-06-18"
 MAX_STDERR_BYTES = 64 * 1024
 STRESS_RESPONSE_TIMEOUT_SECONDS = 30.0
+CHAOS_RESPONSE_TIMEOUT_SECONDS = 30.0
 CHAOS_EXIT_TIMEOUT_SECONDS = 10.0
+PROCESS_REAP_TIMEOUT_SECONDS = 1.0
 FORBIDDEN_OUTPUT_PATTERNS = (
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -149,24 +152,236 @@ class GuardEnvironment:
         self.close()
 
 
+class _WindowsJob:
+    """Generation-safe Windows process-tree ownership via a kernel Job Object."""
+
+    KILL_ON_JOB_CLOSE = 0x00002000
+    BASIC_ACCOUNTING_INFORMATION = 1
+    BASIC_PROCESS_ID_LIST = 3
+    EXTENDED_LIMIT_INFORMATION = 9
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise ReliabilityError("Windows Job Object requested on non-Windows host")
+
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        class BasicProcessIdList(ctypes.Structure):
+            _fields_ = [
+                ("NumberOfAssignedProcesses", wintypes.DWORD),
+                ("NumberOfProcessIdsInList", wintypes.DWORD),
+                ("ProcessIdList", ctypes.c_size_t * 1),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ReliabilityError(
+                f"CreateJobObjectW failed with WinError {ctypes.get_last_error()}"
+            )
+
+        limits = ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = self.KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            handle,
+            self.EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            error = ctypes.get_last_error()
+            kernel32.CloseHandle(handle)
+            raise ReliabilityError(
+                f"SetInformationJobObject failed with WinError {error}"
+            )
+
+        self._ctypes = ctypes
+        self._wintypes = wintypes
+        self._kernel32 = kernel32
+        self._accounting_type = BasicAccountingInformation
+        self._process_id_list_type = BasicProcessIdList
+        self._handle = handle
+
+    def assign(self, process: subprocess.Popen[bytes]) -> None:
+        if self._handle is None:
+            raise ReliabilityError("Windows Job Object is already closed")
+        process_handle = self._wintypes.HANDLE(int(process._handle))
+        if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+            raise ReliabilityError(
+                "AssignProcessToJobObject failed with WinError "
+                f"{self._ctypes.get_last_error()}"
+            )
+
+    def active_processes(self) -> int:
+        if self._handle is None:
+            raise ReliabilityError("Windows Job Object is already closed")
+        accounting = self._accounting_type()
+        returned = self._wintypes.DWORD()
+        if not self._kernel32.QueryInformationJobObject(
+            self._handle,
+            self.BASIC_ACCOUNTING_INFORMATION,
+            self._ctypes.byref(accounting),
+            self._ctypes.sizeof(accounting),
+            self._ctypes.byref(returned),
+        ):
+            raise ReliabilityError(
+                "QueryInformationJobObject failed with WinError "
+                f"{self._ctypes.get_last_error()}"
+            )
+        return int(accounting.ActiveProcesses)
+
+    def active_process_ids(self) -> tuple[int, ...]:
+        if self._handle is None:
+            raise ReliabilityError("Windows Job Object is already closed")
+        capacity = 16
+        while capacity <= 4096:
+            size = (
+                self._ctypes.sizeof(self._process_id_list_type)
+                + (capacity - 1) * self._ctypes.sizeof(self._ctypes.c_size_t)
+            )
+            buffer = self._ctypes.create_string_buffer(size)
+            returned = self._wintypes.DWORD()
+            if self._kernel32.QueryInformationJobObject(
+                self._handle,
+                self.BASIC_PROCESS_ID_LIST,
+                buffer,
+                size,
+                self._ctypes.byref(returned),
+            ):
+                header = self._ctypes.cast(
+                    buffer, self._ctypes.POINTER(self._process_id_list_type)
+                ).contents
+                count = int(header.NumberOfProcessIdsInList)
+                array_type = self._ctypes.c_size_t * count
+                offset = self._process_id_list_type.ProcessIdList.offset
+                values = array_type.from_buffer(buffer, offset)
+                return tuple(int(value) for value in values)
+            error = self._ctypes.get_last_error()
+            if error != 234:  # ERROR_MORE_DATA
+                raise ReliabilityError(
+                    "QueryInformationJobObject process list failed with WinError "
+                    f"{error}"
+                )
+            capacity *= 2
+        raise ReliabilityError("Windows Job Object process list exceeded 4096 members")
+
+    def wait_for_empty(self, timeout: float) -> tuple[int, ...]:
+        deadline = time.monotonic() + timeout
+        while True:
+            active = self.active_process_ids()
+            if not active:
+                return ()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return active
+            threading.Event().wait(min(0.01, remaining))
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
 class RawMCPProcess:
     """One raw JSON-RPC stdio server lifecycle with bounded diagnostics."""
 
     def __init__(self, guard: GuardEnvironment) -> None:
         self.guard = guard
+        self._windows_job = _WindowsJob() if os.name == "nt" else None
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-        self.process = subprocess.Popen(
-            [sys.executable, str(ROOT / "server.py")],
-            cwd=guard.cwd,
-            env=guard.env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=creationflags,
-            start_new_session=os.name != "nt",
-        )
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, str(ROOT / "server.py")],
+                cwd=guard.cwd,
+                env=guard.env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creationflags,
+                start_new_session=os.name != "nt",
+            )
+            if self._windows_job is not None:
+                self._windows_job.assign(self.process)
+        except Exception:
+            if self._windows_job is not None:
+                self._windows_job.close()
+            process = getattr(self, "process", None)
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            raise
         self.pid = self.process.pid
         self._stdout_queue: queue.Queue[bytes] = queue.Queue()
         self.stdout_lines: list[bytes] = []
@@ -226,7 +441,7 @@ class RawMCPProcess:
         fragments = (1, 2, 3, 5, 8, 13, 21) if fragmented else None
         self.write(encoded, fragments)
 
-    def read(self, timeout: float = 10.0) -> dict[str, Any]:
+    def read(self, timeout: float = CHAOS_RESPONSE_TIMEOUT_SECONDS) -> dict[str, Any]:
         try:
             line = self._stdout_queue.get(timeout=timeout)
         except queue.Empty as exc:
@@ -251,7 +466,7 @@ class RawMCPProcess:
         try:
             returncode = self.process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            self.process.kill()
+            self._terminate_tree()
             self.process.wait(timeout=5)
             raise ReliabilityError("MCP process did not exit before timeout") from exc
         finally:
@@ -261,14 +476,42 @@ class RawMCPProcess:
                 if stream is not None:
                     stream.close()
         self.validate_output()
+        self._assert_containment_reaped()
         self.guard.unregister(self)
         return returncode, time.monotonic() - started
+
+    def _terminate_tree(self) -> None:
+        if self._windows_job is not None:
+            self._windows_job.close()
+            return
+        try:
+            os.killpg(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def _assert_containment_reaped(self) -> None:
+        if self._windows_job is not None:
+            try:
+                active = self._windows_job.wait_for_empty(
+                    PROCESS_REAP_TIMEOUT_SECONDS
+                )
+            finally:
+                self._windows_job.close()
+            if active:
+                raise ReliabilityError(
+                    f"Windows Job Object retained process IDs {list(active)!r}"
+                )
+            return
+        lingering = _lingering_process_groups({self.pid})
+        if lingering:
+            raise ReliabilityError(
+                f"POSIX process groups survived: {sorted(lingering)!r}"
+            )
 
     def abort(self) -> None:
         """Best-effort cleanup used only while unwinding another failure."""
         self.close_input()
-        if self.process.poll() is None:
-            self.process.kill()
+        self._terminate_tree()
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -300,7 +543,7 @@ def initialize(
     process: RawMCPProcess,
     *,
     fragmented: bool = False,
-    timeout: float = 10.0,
+    timeout: float = CHAOS_RESPONSE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     process.send(
         {
@@ -488,59 +731,8 @@ def _resource_count() -> int | None:
     return None
 
 
-def _lingering_child_processes(parent_pids: set[int]) -> set[int]:
-    """Return live descendants still attached to completed server parents."""
-    if not parent_pids:
-        return set()
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-
-        class ProcessEntry(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", wintypes.DWORD),
-                ("cntUsage", wintypes.DWORD),
-                ("th32ProcessID", wintypes.DWORD),
-                ("th32DefaultHeapID", ctypes.c_size_t),
-                ("th32ModuleID", wintypes.DWORD),
-                ("cntThreads", wintypes.DWORD),
-                ("th32ParentProcessID", wintypes.DWORD),
-                ("pcPriClassBase", wintypes.LONG),
-                ("dwFlags", wintypes.DWORD),
-                ("szExeFile", wintypes.WCHAR * 260),
-            ]
-
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-        kernel32.Process32FirstW.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(ProcessEntry),
-        ]
-        kernel32.Process32FirstW.restype = wintypes.BOOL
-        kernel32.Process32NextW.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(ProcessEntry),
-        ]
-        kernel32.Process32NextW.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-        if snapshot == wintypes.HANDLE(-1).value:
-            raise ReliabilityError("cannot snapshot Windows process tree")
-        children: set[int] = set()
-        try:
-            entry = ProcessEntry()
-            entry.dwSize = ctypes.sizeof(ProcessEntry)
-            available = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-            while available:
-                if int(entry.th32ParentProcessID) in parent_pids:
-                    children.add(int(entry.th32ProcessID))
-                available = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-        finally:
-            kernel32.CloseHandle(snapshot)
-        return children
-
+def _lingering_process_groups(parent_pids: set[int]) -> set[int]:
+    """Return live POSIX sessions belonging to completed server processes."""
     lingering: set[int] = set()
     for process_group in parent_pids:
         try:
@@ -662,12 +854,6 @@ def run_process_stress(
     expected = sequential + workers * per_worker
     if len(records) != expected:
         raise ReliabilityError("stress lifecycle accounting mismatch")
-    parent_pids = {pid for pid, _ in records}
-    lingering_children = _lingering_child_processes(parent_pids)
-    if lingering_children:
-        raise ReliabilityError(
-            f"lingering child processes detected: {sorted(lingering_children)!r}"
-        )
     lifecycle_seconds = sorted(duration for _, duration in records)
     p95_index = max(0, int(len(lifecycle_seconds) * 0.95) - 1)
 

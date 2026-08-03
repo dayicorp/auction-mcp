@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-210%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-211%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
-- **230 项 pytest 测试** — 210 项离线通过 + 20 项 Live 默认跳过
+- **231 项 pytest 测试** — 211 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -75,7 +75,7 @@ python scripts/coverage_gate.py
 python scripts/mutation_gate.py
 ```
 
-原始客户端覆盖分片写入、连续请求、未知 method、无效工具参数、损坏 JSON、提前 EOF 和客户端超时。每个进程都从仓库外 cwd 启动，在 `sitecustomize` 强制断网下完成握手/工具列表/安全离线调用，验证 stdout 仅含 JSON-RPC、stderr 小于 64 KiB 且不含敏感模式，并在结束后回收进程、管道、线程与临时目录。故障字段和处置见 [`docs/reliability.md`](docs/reliability.md)。
+原始客户端覆盖分片写入、连续请求、未知 method、无效工具参数、损坏 JSON、提前 EOF 和客户端超时。每个进程都从仓库外 cwd 启动，在 `sitecustomize` 强制断网下完成握手/工具列表/安全离线调用，验证 stdout 仅含 JSON-RPC、stderr 小于 64 KiB 且不含敏感模式，并在结束后回收进程、管道、线程与临时目录。Windows 使用每生命周期独立 Job Object 验证内核成员归零，Linux 使用独立 session/process group；两者都不依赖可能被系统复用的历史 PID 快照。故障字段和处置见 [`docs/reliability.md`](docs/reliability.md)。
 
 ## 工具 (12 个)
 
@@ -243,7 +243,7 @@ auction-mcp/
 ├── scripts/coverage_gate.py # 离线语句/分支覆盖率门禁
 ├── scripts/mutation_gate.py # 12个安全关键确定性变异门禁
 ├── docs/reliability.md  # 机器诊断字段与故障定位
-└── tests/               # 230 项 pytest (210 项离线 + 20 项 Live 默认跳过)
+└── tests/               # 231 项 pytest (211 项离线 + 20 项 Live 默认跳过)
 ```
 
 ### 为什么默认链路是纯 httpx

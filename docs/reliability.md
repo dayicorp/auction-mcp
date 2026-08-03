@@ -16,6 +16,11 @@ python scripts/runtime_chaos.py --mode all
 `processes_reaped` 必须等于 260，`network_blocked`、`external_cwd` 和
 `stdout_protocol_clean` 必须为 true。Windows 用父进程 handle 数、Linux 用
 `/proc/self/fd` 检查门禁自身资源增长；每个子进程仍必须被 `wait()` 回收。
+Windows 的每个生命周期另有独立 Job Object，并以 Job 内核成员身份验证活跃
+进程归零，避免系统复用 PID 后把无关进程误判为 MCP 子进程；异常路径关闭 Job
+时用 `KILL_ON_JOB_CLOSE` 回收整棵树。父进程退出后最多用 1 秒等待 Job accounting
+归零；超时会报告 Job 内真实 PID 并硬失败。Linux 使用每进程独立
+session/process group，并在退出后验证进程组不存在。
 
 常见错误：
 
@@ -24,6 +29,7 @@ python scripts/runtime_chaos.py --mode all
 - `stderr exceeded 64 KiB`：诊断失控；压缩错误输出或修复重复异常，不能提高上限掩盖问题。
 - `did not exit before timeout`：子进程未响应 EOF；检查 MCP 循环和资源关闭，不得增加无界等待。
 - `parent process resource count leaked`：管道、线程或进程句柄未回收；检查所有异常路径的 `finish/abort`。
+- `Windows Job Object retained` / `POSIX process groups survived`：MCP 进程树仍有活跃成员；不得用全局父 PID 快照替代 Job/process-group 身份验证。
 
 ## 覆盖率
 
