@@ -6,6 +6,7 @@ temporary venv outside the repository, installs ``requirements.txt``, runs
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -55,6 +56,7 @@ def run_checked(
 
 
 def main() -> int:
+    diagnostic: dict[str, object] = {"stage": "startup"}
     try:
         with tempfile.TemporaryDirectory(prefix="auction-mcp-cleanroom-") as temp:
             clean_root = Path(temp).resolve()
@@ -62,6 +64,7 @@ def main() -> int:
             consumer_cwd = clean_root / "consumer-cwd"
             consumer_cwd.mkdir()
 
+            diagnostic["stage"] = "create_venv"
             print("[RUN] create isolated venv", flush=True)
             venv.EnvBuilder(with_pip=True, clear=True).create(environment_root)
             python = venv_python(environment_root)
@@ -70,6 +73,7 @@ def main() -> int:
             repository_venv = (ROOT / ".venv").resolve()
             if python.resolve() == venv_python(repository_venv).resolve():
                 raise CleanroomError("repository .venv reuse is forbidden")
+            diagnostic["fresh_venv"] = True
 
             env = os.environ.copy()
             env.pop("PYTHONPATH", None)
@@ -86,6 +90,7 @@ def main() -> int:
                 }
             )
 
+            diagnostic["stage"] = "install_requirements"
             run_checked(
                 [
                     str(python),
@@ -101,6 +106,8 @@ def main() -> int:
                 timeout_seconds=300,
                 label="install requirements into clean-room venv",
             )
+            diagnostic["requirements_installed"] = True
+            diagnostic["stage"] = "pip_check"
             run_checked(
                 [str(python), "-m", "pip", "check"],
                 cwd=consumer_cwd,
@@ -108,6 +115,8 @@ def main() -> int:
                 timeout_seconds=60,
                 label="pip check",
             )
+            diagnostic["pip_check"] = "pass"
+            diagnostic["stage"] = "release_gate"
             run_checked(
                 [str(python), str(ROOT / "scripts" / "verify_release.py")],
                 cwd=consumer_cwd,
@@ -115,13 +124,26 @@ def main() -> int:
                 timeout_seconds=300,
                 label="complete release gate from external cwd",
             )
+            diagnostic["release_gate"] = "pass"
     except (OSError, subprocess.SubprocessError, CleanroomError) as exc:
+        diagnostic["error"] = f"{type(exc).__name__}: {exc}"
+        print(
+            "CLEANROOM_DIAGNOSTIC="
+            + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True),
+            file=sys.stderr,
+        )
         print(
             f"CLEANROOM_VERIFICATION: FAIL: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return 1
 
+    diagnostic["stage"] = "complete"
+    diagnostic["temporary_environment_removed"] = True
+    print(
+        "CLEANROOM_DIAGNOSTIC="
+        + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)
+    )
     print("CLEANROOM_VERIFICATION: PASS")
     return 0
 

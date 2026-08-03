@@ -32,32 +32,27 @@ FORBIDDEN_STDERR_PATTERNS = (
 NETWORK_GUARD_SOURCE = """\
 import socket
 
+from safety_core import is_local_socket_address
+
 _original_connect = socket.socket.connect
 _original_connect_ex = socket.socket.connect_ex
 _original_create_connection = socket.create_connection
-
-def _is_local(address):
-    if isinstance(address, str):
-        return True
-    if not isinstance(address, tuple) or not address:
-        return False
-    return address[0] in {"127.0.0.1", "::1", "localhost"}
 
 def _network_disabled(address):
     raise RuntimeError("network disabled by clean-room consumer")
 
 def _guarded_connect(self, address):
-    if _is_local(address):
+    if is_local_socket_address(address):
         return _original_connect(self, address)
     return _network_disabled(address)
 
 def _guarded_connect_ex(self, address):
-    if _is_local(address):
+    if is_local_socket_address(address):
         return _original_connect_ex(self, address)
     return _network_disabled(address)
 
 def _guarded_create_connection(address, *args, **kwargs):
-    if _is_local(address):
+    if is_local_socket_address(address):
         return _original_create_connection(address, *args, **kwargs)
     return _network_disabled(address)
 
@@ -253,7 +248,9 @@ async def run_probe(repo_root: Path, contract_path: Path) -> dict[str, Any]:
             NETWORK_GUARD_SOURCE, encoding="utf-8"
         )
         server_env = os.environ.copy()
-        server_env["PYTHONPATH"] = str(guard_root)
+        server_env["PYTHONPATH"] = os.pathsep.join(
+            [str(guard_root), str(repo_root)]
+        )
         verify_network_guard(server_env, consumer_cwd)
         parameters = StdioServerParameters(
             command=sys.executable,

@@ -28,6 +28,7 @@ from ali_h5_client import (
 )
 from ali_pc_browser_client import AliPCBrowserClient
 from jd_h5_client import JDH5Client, JD_AREAS, resolve_jd_region
+from safety_core import area_structure_error, ali_city_resolution_allowed
 
 # ============================================================ init
 
@@ -81,12 +82,11 @@ def _validate_area_structural(
 
     返回 None = 通过; 返回 dict = 错误.
     """
-    if city and not province:
-        return {"error": "city_requires_province",
-                "message": "传 city 必须同时传 province"}
-    if district and not city:
-        return {"error": "district_requires_city",
-                "message": "传 district 必须同时传 city"}
+    error = area_structure_error(province, city, district)
+    if error == "city_requires_province":
+        return {"error": error, "message": "传 city 必须同时传 province"}
+    if error == "district_requires_city":
+        return {"error": error, "message": "传 district 必须同时传 city"}
     return None
 
 
@@ -179,19 +179,7 @@ def _validate_ali_pc_resolution(
 
     if city:
         c_code = resolve_area_ali(province, city)
-        # 北京/天津/上海/重庆的“市”层级与省级共用 XX0000 编码；仅当
-        # 省市名称确实指向同一直辖市时允许同码，其他同码均是解析降级。
-        municipality_by_prefix = {
-            "11": "北京", "12": "天津", "31": "上海", "50": "重庆",
-        }
-        municipality = municipality_by_prefix.get(p_code[:2])
-        municipality_aliases = (
-            {municipality, f"{municipality}市"} if municipality else set()
-        )
-        same_municipality = (
-            province in municipality_aliases and city in municipality_aliases
-        )
-        if c_code is None or (c_code == p_code and not same_municipality):
+        if not ali_city_resolution_allowed(p_code, c_code, province, city):
             return {"error": "region_resolution_failed",
                     "diagnostics": {
                         "resolution": "city",

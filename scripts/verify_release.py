@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import json
 import os
 from pathlib import Path, PurePosixPath
 import py_compile
@@ -24,6 +25,7 @@ EXPECTED_REQUIREMENTS = {
     "httpx>=0.27",
     "playwright>=1.50,<2",
     "pytest>=8.0",
+    "coverage>=7.10,<8",
 }
 
 EXPECTED_MCP_TOOLS = {
@@ -47,6 +49,7 @@ FORBIDDEN_PATH_PARTS = {
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    "htmlcov",
     ".venv",
     ".workbuddy",
     "__pycache__",
@@ -58,6 +61,8 @@ FORBIDDEN_PATH_PARTS = {
 FORBIDDEN_FILE_NAMES = {
     "cookies.json",
     "storage_state.json",
+    ".coverage",
+    "coverage.json",
 }
 
 FORBIDDEN_SUFFIXES = {
@@ -175,7 +180,7 @@ def verify_dependency_contract() -> dict[str, str]:
 
     versions = {
         name: importlib.metadata.version(name)
-        for name in ("mcp", "httpx", "playwright", "pytest")
+        for name in ("mcp", "httpx", "playwright", "pytest", "coverage")
     }
     if _version_tuple(versions["mcp"])[0] != 1:
         raise VerificationError(f"MCP must remain on 1.x, got {versions['mcp']}")
@@ -187,6 +192,10 @@ def verify_dependency_contract() -> dict[str, str]:
         )
     if _version_tuple(versions["pytest"]) < (8,):
         raise VerificationError(f"pytest must be >=8, got {versions['pytest']}")
+    if not ((7, 10) <= _version_tuple(versions["coverage"]) < (8,)):
+        raise VerificationError(
+            f"coverage must be >=7.10,<8, got {versions['coverage']}"
+        )
     return versions
 
 
@@ -416,47 +425,79 @@ def run_offline_tests() -> None:
 
 
 def main() -> int:
+    diagnostic: dict[str, object] = {"stage": "startup"}
     try:
+        diagnostic["stage"] = "cleanroom_isolation"
         if verify_cleanroom_isolation():
+            diagnostic["cleanroom_isolated"] = True
             print("[PASS] clean-room interpreter and external cwd isolation")
 
+        diagnostic["stage"] = "tracked_artifacts"
         paths = tracked_files()
         verify_forbidden_tracked_paths(paths)
+        diagnostic["repository_files"] = len(paths)
         print(f"[PASS] forbidden tracked artifacts ({len(paths)} files)")
 
+        diagnostic["stage"] = "sensitive_scan"
         scan_sensitive_text(paths)
+        diagnostic["sensitive_scan"] = "pass"
         print("[PASS] sensitive information scan")
 
+        diagnostic["stage"] = "github_actions"
         workflow_count = verify_github_actions_pinned(paths)
+        diagnostic["immutable_workflows"] = workflow_count
         print(f"[PASS] immutable GitHub Actions ({workflow_count} workflows)")
 
+        diagnostic["stage"] = "dependencies"
         versions = verify_dependency_contract()
+        diagnostic["dependencies"] = versions
         rendered_versions = ", ".join(
             f"{name}={version}" for name, version in sorted(versions.items())
         )
         print(f"[PASS] dependency contract ({rendered_versions})")
 
+        diagnostic["stage"] = "python_compilation"
         python_count = verify_python_compilation(paths)
+        diagnostic["python_files_compiled"] = python_count
         print(f"[PASS] Python compilation ({python_count} tracked files)")
 
+        diagnostic["stage"] = "mcp_registry"
         tools = verify_mcp_tools()
+        diagnostic["mcp_tools"] = len(tools)
         print(f"[PASS] MCP registry ({len(tools)} exact tools)")
 
+        diagnostic["stage"] = "mcp_stdio"
         stdio_tools = verify_mcp_stdio_startup()
+        diagnostic["mcp_stdio_tools"] = len(stdio_tools)
         print(
             "[PASS] MCP stdio startup "
             f"(initialize + {len(stdio_tools)} exact tools)"
         )
 
+        diagnostic["stage"] = "consumer_probe"
         verify_consumer_probe()
+        diagnostic["consumer_probe"] = "pass"
         print("[PASS] clean-room MCP consumer contract and lifecycle")
 
+        diagnostic["stage"] = "offline_pytest"
         run_offline_tests()
+        diagnostic["offline_pytest"] = "pass"
         print("[PASS] full offline pytest suite")
     except (OSError, VerificationError) as exc:
+        diagnostic["error"] = f"{type(exc).__name__}: {exc}"
+        print(
+            "RELEASE_DIAGNOSTIC="
+            + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True),
+            file=sys.stderr,
+        )
         print(f"RELEASE_VERIFICATION: FAIL: {exc}", file=sys.stderr)
         return 1
 
+    diagnostic["stage"] = "complete"
+    print(
+        "RELEASE_DIAGNOSTIC="
+        + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)
+    )
     print("RELEASE_VERIFICATION: PASS")
     return 0
 

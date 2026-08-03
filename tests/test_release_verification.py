@@ -81,6 +81,7 @@ def test_release_gate_dependency_contract_matches_repository():
         "httpx>=0.27",
         "playwright>=1.50,<2",
         "pytest>=8.0",
+        "coverage>=7.10,<8",
     }
 
 
@@ -93,6 +94,9 @@ def test_release_gate_dependency_contract_matches_repository():
         "tests/__pycache__/test_example.pyc",
         "playwright_chromiumdev_profile-X/data.txt",
         "_agent_round3_copy/server.py",
+        ".coverage",
+        "coverage.json",
+        "htmlcov/index.html",
     ],
 )
 def test_release_gate_rejects_forbidden_tracked_artifacts(path):
@@ -118,6 +122,19 @@ def test_release_gate_pytest_command_is_offline_only():
     assert command[-1] == "tests"
     assert "--run-live" not in command
     assert command[1:4] == ["-m", "pytest", "-q"]
+
+
+def test_release_and_cleanroom_gates_emit_machine_readable_diagnostics():
+    release_source = (ROOT / "scripts" / "verify_release.py").read_text(
+        encoding="utf-8"
+    )
+    cleanroom_source = (ROOT / "scripts" / "verify_cleanroom.py").read_text(
+        encoding="utf-8"
+    )
+    assert "RELEASE_DIAGNOSTIC=" in release_source
+    assert 'diagnostic["stage"]' in release_source
+    assert "CLEANROOM_DIAGNOSTIC=" in cleanroom_source
+    assert 'diagnostic["temporary_environment_removed"] = True' in cleanroom_source
 
 
 def test_release_gate_rejects_mutable_action_references():
@@ -165,7 +182,14 @@ def test_ci_workflow_covers_full_cross_platform_matrix_and_gate():
     assert "actions/setup-python@v7" not in workflow
     assert "python scripts/verify_cleanroom.py" in workflow
     assert "python scripts/verify_release.py" not in workflow
-    assert "pip install -r requirements.txt" not in workflow
+    assert "python scripts/runtime_chaos.py --mode all" in workflow
+    assert "python scripts/coverage_gate.py" in workflow
+    assert "python scripts/mutation_gate.py" in workflow
+    assert "Runtime stress / ${{ matrix.os }}" in workflow
+    assert "Mutation and coverage / Ubuntu / Python 3.12" in workflow
+    assert "timeout-minutes: 45" in workflow
+    assert "timeout-minutes: 30" in workflow
+    assert "python -m pip install --no-input -r requirements.txt" in workflow
     assert "--run-live" not in workflow
     assert "secrets." not in workflow
 

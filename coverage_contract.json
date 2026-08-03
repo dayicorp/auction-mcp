@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "baseline": {
+    "commit": "ec4e050031a0c038aebf26b06d4643592fa01592",
+    "measured_statement_coverage_percent": 75.59726962457339,
+    "measured_branch_coverage_percent": 66.25,
+    "measured_combined_coverage_percent": 72.88135593220339,
+    "measured_tests": {
+      "passed": 176,
+      "skipped": 20
+    }
+  },
+  "minimum_statement_coverage_percent": 75.5,
+  "minimum_branch_coverage_percent": 66.2,
+  "minimum_combined_coverage_percent": 72.8,
+  "source_modules": [
+    "server",
+    "ali_h5_client",
+    "jd_h5_client",
+    "safety_core"
+  ],
+  "critical_files": {
+    "safety_core.py": {
+      "minimum_branch_coverage_percent": 100.0,
+      "minimum_statement_coverage_percent": 100.0
+    }
+  }
+}

@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-176%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-210%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
-- **196 项 pytest 测试** — 176 项离线通过 + 20 项 Live 默认跳过
+- **230 项 pytest 测试** — 210 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -45,14 +45,14 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```
 
 ```bash
-pip install -r requirements.txt    # mcp 1.x, httpx, playwright, pytest
+pip install -r requirements.txt    # mcp 1.x, httpx, playwright, pytest, coverage
 pytest                             # 单元 + 容错 (零网络)
 pytest --run-live                  # + 集成 (真打 Ali/JD API)
 ```
 
 ### 自动化 CI 与本地发布门禁
 
-GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行同一套 clean-room 发布门禁，矩阵覆盖 Windows/Linux 与 Python 3.10、3.12、3.14。每个任务都在仓库外创建全新临时 venv、安装 `requirements.txt`、执行 `pip check`，再从任意非仓库 cwd 运行统一门禁；不会复用 runner 或开发者的既有环境。工作流权限固定为 `contents: read`，同一分支的新运行会取消旧运行，每个矩阵任务最多执行 20 分钟。所有外部 Action 固定到40位不可变提交 SHA，checkout 不保留Git凭据；Dependabot每周检查GitHub Actions和根目录Python依赖，最多同时提出5个更新PR。
+GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行九个任务：六个 clean-room 发布矩阵覆盖 Windows/Linux 与 Python 3.10、3.12、3.14；两个 Windows/Linux Python 3.12 主动压力任务；一个 Linux Python 3.12 覆盖率与变异任务。每个 clean-room 任务都在仓库外创建全新临时 venv、安装 `requirements.txt`、执行 `pip check`，再从任意非仓库 cwd 运行统一门禁；不会复用 runner 或开发者的既有环境。工作流权限固定为 `contents: read`，同一分支的新运行会取消旧运行，所有任务都有固定超时。所有外部 Action 固定到40位不可变提交 SHA，checkout 不保留Git凭据；Dependabot每周检查GitHub Actions和根目录Python依赖，最多同时提出5个更新PR。
 
 本地执行与 CI 完全相同的 clean-room 验收（只要求系统 Python，不复用项目 `.venv`）：
 
@@ -61,6 +61,21 @@ python scripts/verify_cleanroom.py
 ```
 
 bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，随后调用 `scripts/verify_release.py`。统一门禁完成所有受 Git 跟踪的 Python 文件编译、进程内精确 12 工具注册，并通过官方 MCP 客户端从仓库外 cwd 启动真实 `server.py`，完成 stdio `initialize`、`tools/list`、精确参数 Schema 契约、静态地区读取、无效输入 fail-closed、浏览器未启动状态、异常退出、超时清理和 stderr 安全检查。消费端子进程会加载临时网络阻断器，任何意外 socket 连接都会立即失败。门禁还检查依赖版本、敏感信息与禁止产物、Action不可变SHA，并运行全部离线 pytest。整个流程会清空外部 `PYTEST_ADDOPTS`，不会传入 `--run-live`、下载或启动浏览器，也不会读取、导出或保存 Cookie。
+
+P3.4 额外可靠性门禁均输出单行机器可读 JSON，且不使用纯 `sleep` 伪造长稳时间：
+
+```bash
+# 原始 JSON-RPC 混沌 + 100 次顺序 + 8 路×20 次并发，共 267 个真实进程生命周期
+python scripts/runtime_chaos.py --mode all
+
+# 冻结于 ec4e050 基线；语句≥75.5%、分支≥66.2%，fail-closed 核心两者均为100%
+python scripts/coverage_gate.py
+
+# 12 个强制安全变异；任何幸存、超时或基础设施退出均失败
+python scripts/mutation_gate.py
+```
+
+原始客户端覆盖分片写入、连续请求、未知 method、无效工具参数、损坏 JSON、提前 EOF 和客户端超时。每个进程都从仓库外 cwd 启动，在 `sitecustomize` 强制断网下完成握手/工具列表/安全离线调用，验证 stdout 仅含 JSON-RPC、stderr 小于 64 KiB 且不含敏感模式，并在结束后回收进程、管道、线程与临时目录。故障字段和处置见 [`docs/reliability.md`](docs/reliability.md)。
 
 ## 工具 (12 个)
 
@@ -222,7 +237,13 @@ auction-mcp/
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
 ├── scripts/manual_live_pc_pagination.py # 人工确认关闭的 PC 分页协议发现
 ├── scripts/manual_live_pc_page2.py # 正式 page=2 交互式 PC Live 验收
-└── tests/               # 196 项 pytest (176 项离线 + 20 项 Live 默认跳过)
+├── safety_core.py       # 可独立达到100%分支覆盖的fail-closed纯函数核心
+├── coverage_contract.json # 覆盖率基线、阈值与关键文件契约
+├── scripts/runtime_chaos.py # 原始stdio混沌与267生命周期跨平台压力门禁
+├── scripts/coverage_gate.py # 离线语句/分支覆盖率门禁
+├── scripts/mutation_gate.py # 12个安全关键确定性变异门禁
+├── docs/reliability.md  # 机器诊断字段与故障定位
+└── tests/               # 230 项 pytest (210 项离线 + 20 项 Live 默认跳过)
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -241,6 +262,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 
 ## Roadmap
 
+- [x] **P3.4 运行时混沌、压力、覆盖与变异闭环** — 原始stdio客户端验证七类协议/退出/恢复边界；Windows/Linux各运行100次顺序与8×20次并发生命周期；覆盖门禁从 `ec4e050` 真实测得语句75.597%、分支66.25%并冻结不低于75.5%/66.2%，fail-closed核心两者100%；12个地区、参数、Schema、断网和默认值安全变异必须全部被测试杀死；CI扩展为九个有界任务
 - [x] **P3.3 clean-room 消费端可靠性** — 每个 CI 矩阵任务从系统 Python 创建仓库外临时 venv，全新安装依赖并执行 `pip check`；独立消费者从非仓库 cwd 完成真实 MCP 握手、12 工具参数 Schema、五个强制断网离线调用、无效输入、异常退出、超时清理和 stderr 边界验证。临时环境在结束后销毁，不复用项目 `.venv`，不下载或启动浏览器
 - [x] **P3.2 MCP stdio 启动可靠性** — 发布门禁除进程内工具清单外，使用官方 MCP 客户端真实启动 `server.py`，在 Windows/Linux 和 Python 3.10/3.12/3.14 上验证 stdio 初始化及精确 12 工具 `tools/list`；启动、协议、超时或工具漂移均 fail-closed，全程离线且不启动浏览器
 - [x] **P2.13-A 远端消费端依赖修正** — 2026-08-02 在全新 Python 3.14.6 环境中发现 `mcp>=1.0` 会解析到不兼容的 MCP 2.0（已移除 `mcp.server.fastmcp`）；依赖范围收紧为 `mcp>=1.0,<2`，并增加发布依赖契约测试，防止干净安装再次跨越不兼容主版本

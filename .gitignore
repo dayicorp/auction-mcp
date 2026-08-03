@@ -55,3 +55,7 @@ _agent_round3_*/
 # 测试 / 临时
 /tmp/
 *_test_output.*
+.coverage
+.coverage.*
+coverage.json
+htmlcov/
