@@ -26,6 +26,7 @@ release_gate = _load_release_gate()
 
 def test_release_gate_has_exact_public_mcp_manifest():
     assert release_gate.EXPECTED_MCP_TOOLS == {
+        "analyze_auction_asset",
         "ali_get_filter_options",
         "ali_get_supported_areas",
         "ali_pc_browser_close",

@@ -27,6 +27,15 @@ from ali_h5_client import (
     validate_location_scoped, derive_ali_scope_prefix, GB2260,
 )
 from ali_pc_browser_client import AliPCBrowserClient
+from asset_analysis import (
+    AssetAnalysisError,
+    build_asset_analysis,
+    fetch_public_notice,
+    normalize_item_reference,
+    select_exact_auction_item,
+    select_exact_community,
+    validate_text,
+)
 from beike_browser_client import BeikeBrowserClient
 from jd_h5_client import JDH5Client, JD_AREAS, resolve_jd_region
 from safety_core import area_structure_error, ali_city_resolution_allowed
@@ -934,6 +943,148 @@ async def beike_get_xiaoqu_market(
         limit: 返回挂牌上限，范围 1 至 30.
     """
     return await beike.get_xiaoqu_market(city, xiaoqu_id, limit)
+
+
+# ============================================================ tools: 一键资产分析编排
+
+@mcp.tool()
+async def analyze_auction_asset(
+    city: str,
+    community_keyword: str,
+    item_ref: str | None = None,
+    expected_address: str | None = None,
+    screenshot_title: str | None = None,
+    screenshot_area_sqm: float | None = None,
+    screenshot_starting_price_yuan: int | None = None,
+    limit: int = 30,
+) -> dict:
+    """编排阿里详情、法院公告和贝壳市场，输出fail-closed资产初筛报告.
+
+    该工具不会启动浏览器、自动登录、报名、交保证金或出价。调用前必须分别
+    准备好已人工登录的 Ali PC 会话和现有江门贝壳 CDP 页面。若没有 ``item_ref``，
+    则使用 ``expected_address`` 在已登录的 Ali PC 页面做唯一地址反查。
+
+    Args:
+        city: 当前贝壳Provider只支持江门市.
+        community_keyword: 必须唯一精确匹配的贝壳标准小区名.
+        item_ref: 8至20位阿里item_id或固定sf-item详情URL，可为空.
+        expected_address: 地址反查或阿里详情交叉核验字段.
+        screenshot_title: 可选的截图标题交叉核验字段.
+        screenshot_area_sqm: 可选的截图建筑面积交叉核验字段.
+        screenshot_starting_price_yuan: 可选的截图起拍价交叉核验字段.
+        limit: 贝壳第一主挂牌样本上限，范围1至30.
+    """
+    stage = "input_validation"
+    try:
+        normalized_item_id = normalize_item_reference(item_ref)
+        normalized_city = validate_text(city, field="city", required=True)
+        keyword = validate_text(
+            community_keyword,
+            field="community_keyword",
+            required=True,
+        )
+        address = validate_text(
+            expected_address,
+            field="expected_address",
+            required=normalized_item_id is None,
+        )
+        normalized_title = validate_text(
+            screenshot_title,
+            field="screenshot_title",
+            required=False,
+        )
+        if isinstance(limit, bool) or not 1 <= limit <= 30:
+            raise AssetAnalysisError(
+                "ASSET_INVALID_INPUT", "limit必须是1至30的整数"
+            )
+
+        if normalized_item_id is None:
+            stage = "ali_item_resolution"
+            search_result = await ali_pc.search(keyword=address, limit=20)
+            if search_result.get("error") or search_result.get("state") in {
+                "login_required",
+                "action_required",
+            }:
+                return {
+                    "status": "STOPPED",
+                    "stage": stage,
+                    "decision": "NEEDS_REVIEW",
+                    "maximum_bid_yuan": None,
+                    "provider_result": search_result,
+                }
+            normalized_item_id = select_exact_auction_item(search_result, address)
+
+        stage = "ali_detail"
+        detail = await ali_pc.get_item_detail(normalized_item_id)
+        if detail.get("error") or detail.get("state") in {
+            "login_required",
+            "action_required",
+        }:
+            return {
+                "status": "STOPPED",
+                "stage": stage,
+                "decision": "NEEDS_REVIEW",
+                "maximum_bid_yuan": None,
+                "provider_result": detail,
+            }
+
+        announcement_url = detail.get("announcementUrl")
+        if not announcement_url:
+            raise AssetAnalysisError(
+                "ASSET_REQUIRED_FIELD_MISSING", "阿里详情缺少法院公告URL"
+            )
+        stage = "court_notice"
+        notice = await fetch_public_notice(announcement_url, normalized_item_id)
+
+        stage = "beike_community_search"
+        candidate_result = await beike.search_xiaoqu(normalized_city, keyword)
+        if candidate_result.get("status") != "OK":
+            return {
+                "status": "STOPPED",
+                "stage": stage,
+                "decision": "NEEDS_REVIEW",
+                "maximum_bid_yuan": None,
+                "provider_result": candidate_result,
+            }
+        community = select_exact_community(
+            candidate_result.get("candidates") or [], keyword
+        )
+
+        stage = "beike_market"
+        market = await beike.get_xiaoqu_market(
+            normalized_city,
+            str(community["xiaoqu_id"]),
+            limit,
+        )
+        if market.get("status") != "OK":
+            return {
+                "status": "STOPPED",
+                "stage": stage,
+                "decision": "NEEDS_REVIEW",
+                "maximum_bid_yuan": None,
+                "provider_result": market,
+            }
+
+        stage = "analysis"
+        return build_asset_analysis(
+            item_id=normalized_item_id,
+            detail=detail,
+            notice=notice,
+            community=community,
+            market=market,
+            expected_address=address,
+            screenshot_title=normalized_title,
+            screenshot_area_sqm=screenshot_area_sqm,
+            screenshot_starting_price_yuan=screenshot_starting_price_yuan,
+        )
+    except AssetAnalysisError as exc:
+        return exc.as_result(stage=stage)
+    except Exception as exc:
+        return AssetAnalysisError(
+            "ASSET_ANALYSIS_FAILED",
+            "资产分析发生未分类异常，已停止",
+            {"exception_type": type(exc).__name__},
+        ).as_result(stage=stage)
 
 
 # ============================================================ entry

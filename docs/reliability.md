@@ -1,4 +1,4 @@
-# P3.4-P3.6 运行时、资源与发布制品可靠性诊断
+# P3.4-P3.8 运行时、资源、发布制品与资产编排可靠性诊断
 
 三项门禁均为离线、跨工作目录、无浏览器流程。它们不会传入
 `--run-live`，不会读取 Cookie、Token 或浏览器状态，也不会访问外部网络。
@@ -96,14 +96,36 @@ python scripts/verify_artifact.py
 源码白名单创建两个互不复用的构建树。仓库内 PEP 517 后端固定 sdist 的
 gzip/tar 时间、uid/gid、用户名、权限和成员顺序；wheel 与 sdist 的文件名和
 SHA-256 必须分别一致。归档不得包含 tests、scripts、Live、缓存、浏览器状态或密钥类文件。
-wheel 必须包含六个运行模块、四份 JSON 资源、MIT 许可证、Python >=3.10
+wheel 必须包含七个运行模块、四份 JSON 资源、MIT 许可证、Python >=3.10
 元数据、三项运行依赖以及唯一 `auction-mcp = server:main` 入口。
 
 构建审计后，门禁创建第三个 venv，直接安装 wheel 及其声明依赖并运行
 `pip check`。安装后的 `server` 与 `auction_mcp_assets` 必须来自该 venv，不能
 回退到源码仓库；随后从外部 cwd 调用控制台入口，在 socket 强制断网下完成真实
-MCP initialize、tools/list、15工具 Schema、六个安全调用、stderr 和异常/超时
+MCP initialize、tools/list、16工具 Schema、六个安全调用、stderr 和异常/超时
 回收检查。
+
+## P3.8 资产编排诊断
+
+`analyze_auction_asset` 的 `stage` 明确标识停止位置：
+`input_validation`、`ali_item_resolution`、`ali_detail`、`court_notice`、
+`beike_community_search`、`beike_market` 或 `analysis`。停止响应始终包含
+`status=STOPPED`、`decision=NEEDS_REVIEW` 和 `maximum_bid_yuan=null`，不得以
+缺失证据继续计算最高出价。
+
+常见错误码包括：
+
+- `ASSET_INVALID_ITEM_REFERENCE`：不是数字 ID 或固定阿里详情 URL；
+- `ASSET_NOTICE_URL_REJECTED`：公告 URL 的 HTTPS 域名、路径或 item_id 不匹配；
+- `ASSET_NOTICE_TIMEOUT` / `ASSET_NOTICE_FETCH_FAILED`：公开公告超时或读取失败；
+- `ASSET_NOTICE_CONTRACT_DRIFT`：公告正文缺失或页面结构不可识别；
+- `ASSET_ITEM_MATCH_AMBIGUOUS` / `ASSET_COMMUNITY_MATCH_AMBIGUOUS`：地址或小区没有唯一精确匹配；
+- `ASSET_INPUT_EVIDENCE_MISMATCH` / `ASSET_ADDRESS_MISMATCH`：截图、阿里详情和贝壳地址互相矛盾；
+- `ASSET_INDEPENDENT_COMPS_MISSING`：剔除疑似同套挂牌后没有独立样本。
+
+公告解析只返回有界风险事实，不返回整页正文、电话或银行账号；挂牌统计明确是
+要约价格而非成交价格。遇到登录或验证码时保留现有浏览器状态并停止，不得自动
+登录、读取浏览器存储、报名、缴纳保证金或出价。
 
 常见错误：
 

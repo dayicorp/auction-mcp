@@ -6,6 +6,8 @@ include requirements-build.txt
 include build_backend.py
 include ali_h5_client.py
 include ali_pc_browser_client.py
+include asset_analysis.py
+include beike_browser_client.py
 include jd_h5_client.py
 include safety_core.py
 include server.py

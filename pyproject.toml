@@ -26,6 +26,7 @@ packages = ["auction_mcp_assets"]
 py-modules = [
   "ali_h5_client",
   "ali_pc_browser_client",
+  "asset_analysis",
   "beike_browser_client",
   "jd_h5_client",
   "safety_core",

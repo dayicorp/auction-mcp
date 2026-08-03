@@ -268,6 +268,7 @@ def test_original_twelve_tool_schemas_are_byte_semantically_unchanged():
     ).encode("utf-8")
     assert hashlib.sha256(payload).hexdigest() == ORIGINAL_TWELVE_CONTRACT_SHA256
     assert set(contract) == ORIGINAL_TOOL_NAMES | {
+        "analyze_auction_asset",
         "beike_browser_status",
         "beike_search_xiaoqu",
         "beike_get_xiaoqu_market",

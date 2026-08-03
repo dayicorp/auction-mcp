@@ -27,6 +27,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TOOLS = {
+    "analyze_auction_asset",
     "ali_get_filter_options",
     "ali_get_supported_areas",
     "ali_pc_browser_close",

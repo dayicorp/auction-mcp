@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-240%20passed%20%7C%2021%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-260%20passed%20%7C%2021%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合，并提供江门贝壳小区挂牌参考。默认拍卖查询使用纯 Python httpx；浏览器能力均采用明确、隔离且 fail-closed 的交互链路。
@@ -28,7 +28,8 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
 - **江门贝壳小区 Provider** — 只附加现有本机 CDP 页面，搜索标准小区、读取详情和第一主挂牌列表；推荐区、广告、登录和验证码均严格隔离
-- **261 项 pytest 测试** — 240 项离线通过 + 21 项 Live 默认跳过
+- **一键资产初筛编排** — `analyze_auction_asset` 串联阿里详情、公开法院公告、贝壳小区、疑似同套去重、挂牌估值和fail-closed风险结论
+- **pytest 回归与Live隔离** — 精确数量以当前发布门禁输出为准，全部Live默认跳过
 
 ## Quick start
 
@@ -71,7 +72,7 @@ GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行九个任
 python scripts/verify_cleanroom.py
 ```
 
-bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，随后调用 `scripts/verify_release.py`。统一门禁完成所有受 Git 跟踪的 Python 文件编译、进程内精确 15 工具注册，并通过官方 MCP 客户端从仓库外 cwd 启动真实 `server.py`，完成 stdio `initialize`、`tools/list`、精确参数 Schema 契约、静态地区读取、无效输入 fail-closed、浏览器未启动状态、异常退出、超时清理和 stderr 安全检查。消费端子进程会加载临时网络阻断器，任何意外 socket 连接都会立即失败。门禁还检查依赖版本、敏感信息与禁止产物、Action不可变SHA，并运行全部离线 pytest。
+bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，随后调用 `scripts/verify_release.py`。统一门禁完成所有受 Git 跟踪的 Python 文件编译、进程内精确 16 工具注册，并通过官方 MCP 客户端从仓库外 cwd 启动真实 `server.py`，完成 stdio `initialize`、`tools/list`、精确参数 Schema 契约、静态地区读取、无效输入 fail-closed、浏览器未启动状态、异常退出、超时清理和 stderr 安全检查。消费端子进程会加载临时网络阻断器，任何意外 socket 连接都会立即失败。门禁还检查依赖版本、敏感信息与禁止产物、Action不可变SHA，并运行全部离线 pytest。
 
 随后 `scripts/verify_artifact.py` 从显式源码白名单复制出两个独立构建树，以固定
 `SOURCE_DATE_EPOCH` 各构建一次 wheel 和 sdist；仓库内 PEP 517 后端会进一步
@@ -80,7 +81,7 @@ bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，�
 `auction-mcp = server:main` 入口及四份运行数据/公开契约。任何 tests、scripts、
 Live 文件、缓存、密钥或浏览器状态进入制品都会失败。最终 wheel 被安装到第三个
 全新 venv，重新执行 `pip check`，从仓库外 cwd 通过安装后的控制台入口完成断网
-MCP 握手、15 工具 Schema 与六个安全离线调用，并证明 `server` 和数据资源没有
+MCP 握手、16 工具 Schema 与六个安全离线调用，并证明 `server` 和数据资源没有
 从源码 checkout 泄漏。整个流程会清空外部 `PYTEST_ADDOPTS`，不会传入
 `--run-live`、下载或启动浏览器，也不会读取、导出或保存 Cookie。
 
@@ -99,7 +100,7 @@ python scripts/mutation_gate.py
 
 原始客户端覆盖分片写入、连续请求、未知 method、无效工具参数、损坏 JSON、就绪后的下一请求提前 EOF 和客户端超时。EOF 的退出时钟在完整握手后开始，避免把冷解释器启动抖动误判为协议泄漏；10秒阈值、Job/进程组清空和 guard 注销要求保持不变。每个进程都从仓库外 cwd 启动，在 `sitecustomize` 强制断网下完成握手/工具列表/安全离线调用，验证 stdout 仅含 JSON-RPC、stderr 小于 64 KiB 且不含敏感模式，并在结束后回收进程、管道、线程与临时目录。Windows 使用每生命周期独立 Job Object 验证内核成员归零，Linux 使用独立 session/process group；两者都不依赖可能被系统复用的历史 PID 快照。压力门禁记录冷启动、8线程并发设施预热后及两轮完整压力后的资源快照；每轮继续使用原 `+8` 上限，第二轮不得在稳定基线之上继续增长。故障字段和处置见 [`docs/reliability.md`](docs/reliability.md)。
 
-## 工具 (15 个)
+## 工具 (16 个)
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
@@ -118,6 +119,7 @@ python scripts/mutation_gate.py
 | `beike_browser_status` | (无) | 检查现有江门贝壳 CDP 页面、域名和验证码边界，不读取浏览器凭据或存储 |
 | `beike_search_xiaoqu` | `city`, `keyword` | 通过真实键盘事件触发自动补全，只返回标准小区候选；当前仅支持江门市 |
 | `beike_get_xiaoqu_market` | `city`, `xiaoqu_id`, `limit=30` | 读取小区详情及第一非 VIEWDATA 主挂牌列表，返回逐套价格和最小/最大/中位数 |
+| ⭐ **`analyze_auction_asset`** | `city`, `community_keyword`, `item_ref?`, `expected_address?`, 截图核验字段?, `limit=30` | 一次编排阿里详情、法院公告和贝壳市场；唯一匹配、疑似同套去重、估值与风险报告，证据不足时暂缓且最高出价为null |
 
 > 阿里和京东是**两个独立标的池, 不重复**: 阿里偏机构端高价资产 (亿级土地/在建工程), 京东偏散户端住宅/股权/小额债权. 默认调 `search_judicial` 拿双端聚合.
 
@@ -149,6 +151,32 @@ beike_get_xiaoqu_market(
 `BEIKE_NO_MATCH`、`BEIKE_DOM_CONTRACT_DRIFT`、`BEIKE_NAVIGATION_TIMEOUT` 和
 `BEIKE_PRIMARY_LIST_MISSING`。遇到登录或验证码时保持现有页面，由用户手动处理后再
 重试；不得把 CDP 地址作为工具参数，也不得导出浏览器状态。
+
+### 一键资产初筛
+
+统一工具要求调用前已经分别准备好用户手动登录的阿里 PC 会话与现有江门贝壳
+CDP 页面。它不会自行启动浏览器、自动登录、读取浏览器存储、报名、交保证金或
+出价。`item_ref` 接受数字ID或固定阿里详情URL；不传时必须提供
+`expected_address`，工具只接受PC搜索中的唯一地址匹配。
+
+```python
+analyze_auction_asset(
+    city="江门市",
+    community_keyword="益源大厦",
+    item_ref="1065987562217",
+    expected_address="东华二路2号之二1702室",
+    screenshot_title="江门市蓬江区东华二路2号之二1702室",
+    screenshot_area_sqm=106.87,
+    screenshot_starting_price_yuan=296800,
+)
+```
+
+法院公告读取仅允许HTTPS固定域名 `sf.taobao.com`、固定公告路径且查询中的
+`item_id` 必须与阿里详情一致；禁止重定向和任意URL。报告不会返回公告中的电话、
+银行账号或整页正文。阿里与贝壳地址不一致、小区不唯一、截图字段不一致、去除
+疑似同套挂牌后没有独立样本，均会停止。挂牌价明确标记为非成交价；占用、租赁、
+欠费、室内状况等关键事实未知时，结论固定为“暂缓尽调”，`maximum_bid_yuan`
+固定为 `null`。
 
 ### 阿里 PC 完整筛选
 
@@ -275,16 +303,17 @@ search_judicial(province="四川", city="成都市", district="武侯区")
 
 ```
 auction-mcp/
-├── server.py            # FastMCP server, 15 个 @mcp.tool()
+├── server.py            # FastMCP server, 16 个 @mcp.tool()
+├── asset_analysis.py    # 公告读取、精确匹配、去重估值与fail-closed报告
 ├── ali_h5_client.py     # 阿里 H5 mtop client + 双 vintage 解析 + 守门 + 动态学码
 ├── ali_pc_browser_client.py # 非持久化 Chrome PC 完整筛选适配器
 ├── beike_browser_client.py # 附加现有CDP页面的江门贝壳小区Provider
 ├── jd_h5_client.py      # 京东 m. 版 client + 全国地区树查询
-├── auction_mcp_assets/  # wheel内只读运行数据与15工具公开契约
+├── auction_mcp_assets/  # wheel内只读运行数据与16工具公开契约
 │   ├── gb2260.json      # GB 2260 2020 版 (展示用, 不用于查询)
 │   ├── gb2260_200712.json # GB 2260 pre-2013 (阿里查询 vintage)
 │   ├── jd_areas.json    # 京东 33 省/455 市/5344 区县地区树
-│   └── mcp_contract.json # 15 工具公开参数 Schema 契约
+│   └── mcp_contract.json # 16 工具公开参数 Schema 契约
 ├── pyproject.toml       # wheel/sdist元数据与auction-mcp控制台入口
 ├── .github/workflows/ci.yml # Windows/Linux × Python 3.10/3.12/3.14 离线 CI
 ├── scripts/consumer_probe.py # 仓库外 cwd 的真实 MCP 消费端与故障生命周期探针
@@ -301,7 +330,7 @@ auction-mcp/
 ├── scripts/coverage_gate.py # 离线语句/分支覆盖率门禁
 ├── scripts/mutation_gate.py # 12个安全关键确定性变异门禁
 ├── docs/reliability.md  # 机器诊断字段与故障定位
-└── tests/               # 261 项 pytest (240 项离线 + 21 项 Live 默认跳过)
+└── tests/               # 260 项离线 pytest + 21 项 Live 默认跳过
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -320,6 +349,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 
 ## Roadmap
 
+- [x] **P3.8 一键资产分析编排** — 从阿里ID/固定链接或唯一地址反查开始，串联登录态详情、固定域名公开法院公告和江门贝壳市场；对结构化截图交叉核验、精确小区匹配、疑似同套挂牌去重和挂牌估值；占用、租赁、钥匙、欠费或过户事实不足时fail-closed为暂缓，永不生成未经支持的最高出价，也不执行任何交易动作
 - [x] **P3.7 江门贝壳 Provider 正式集成** — 复用现有本机 CDP 页面完成标准小区候选、详情和第一主挂牌列表；历史江海花园16套/中位6306、奥园外滩30套/中位8515及五福村NO_MATCH固化为回归；原12工具Schema不变，总工具数15；登录、验证码、推荐区和浏览器存储均fail-closed
 - [x] **P3.6 可发布制品与真实消费端安装闭环** — 两个独立源码树各构建 wheel/sdist 并要求固定 epoch 下同类 SHA-256 逐字节一致；审计制品只包含运行模块、四份只读数据/契约、入口和许可证；第三个全新 venv 从 wheel 安装依赖并 `pip check`，再从仓库外 cwd 通过 `auction-mcp` 入口完成断网 initialize、精确12工具 Schema、五个安全调用、失败生命周期与源码泄漏检查；六个 Windows/Linux × Python 3.10/3.12/3.14 clean-room 任务全部复现
 - [x] **P3.4 运行时混沌、压力、覆盖与变异闭环** — 原始stdio客户端验证七类协议/退出/恢复边界；Windows/Linux各运行100次顺序与8×20次并发生命周期；覆盖门禁从 `ec4e050` 真实测得语句75.597%、分支66.25%并冻结不低于75.5%/66.2%，fail-closed核心两者100%；12个地区、参数、Schema、断网和默认值安全变异必须全部被测试杀死；CI扩展为九个有界任务

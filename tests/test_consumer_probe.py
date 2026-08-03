@@ -88,4 +88,4 @@ def test_real_consumer_probe_runs_from_external_cwd(tmp_path):
     assert "CLEANROOM_CONSUMER: PASS" in completed.stdout
     assert '"network_blocked": true' in completed.stdout
     assert '"offline_calls": 6' in completed.stdout
-    assert '"tools": 15' in completed.stdout
+    assert '"tools": 16' in completed.stdout

@@ -44,7 +44,7 @@ def test_real_stdio_beike_positive_and_negative_flows():
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         tools = await session.list_tools()
-                        assert len(tools.tools) == 15
+                        assert len(tools.tools) == 16
 
                         status = _json_result(
                             await session.call_tool("beike_browser_status", {}),

@@ -35,6 +35,7 @@ EXPECTED_BUILD_REQUIREMENTS = {
 }
 
 EXPECTED_MCP_TOOLS = {
+    "analyze_auction_asset",
     "ali_get_filter_options",
     "ali_get_supported_areas",
     "ali_pc_browser_close",

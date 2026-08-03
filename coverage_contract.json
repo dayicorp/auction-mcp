@@ -16,6 +16,7 @@
   "source_modules": [
     "server",
     "ali_h5_client",
+    "asset_analysis",
     "jd_h5_client",
     "safety_core"
   ],

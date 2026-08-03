@@ -1,6 +1,18 @@
 {
   "version": 1,
   "tools": {
+    "analyze_auction_asset": {
+      "parameters": {
+        "city": {"nullable": false, "required": true, "type": "string"},
+        "community_keyword": {"nullable": false, "required": true, "type": "string"},
+        "expected_address": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "item_ref": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "limit": {"default": 30, "nullable": false, "required": false, "type": "integer"},
+        "screenshot_area_sqm": {"default": null, "nullable": true, "required": false, "type": "number"},
+        "screenshot_starting_price_yuan": {"default": null, "nullable": true, "required": false, "type": "integer"},
+        "screenshot_title": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
     "ali_get_filter_options": {
       "parameters": {}
     },
