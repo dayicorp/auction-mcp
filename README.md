@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-169%20passed%20%7C%2020%20skipped-brightgreen)
+![Tests](https://img.shields.io/badge/tests-176%20passed%20%7C%2020%20skipped-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合。默认查询纯 Python httpx；可选登录态 PC 浏览器链路提供阿里完整筛选能力。
@@ -27,7 +27,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
-- **189 项 pytest 测试** — 169 项离线通过 + 20 项 Live 默认跳过
+- **196 项 pytest 测试** — 176 项离线通过 + 20 项 Live 默认跳过
 
 ## Quick start
 
@@ -52,15 +52,15 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 
 ### 自动化 CI 与本地发布门禁
 
-GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行同一套离线发布门禁，矩阵覆盖 Windows/Linux 与 Python 3.10、3.12、3.14。工作流权限固定为 `contents: read`，同一分支的新运行会取消旧运行，每个矩阵任务最多执行 20 分钟。所有外部 Action 固定到40位不可变提交 SHA，checkout 不保留Git凭据；Dependabot每周检查GitHub Actions和根目录Python依赖，最多同时提出5个更新PR。
+GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行同一套 clean-room 发布门禁，矩阵覆盖 Windows/Linux 与 Python 3.10、3.12、3.14。每个任务都在仓库外创建全新临时 venv、安装 `requirements.txt`、执行 `pip check`，再从任意非仓库 cwd 运行统一门禁；不会复用 runner 或开发者的既有环境。工作流权限固定为 `contents: read`，同一分支的新运行会取消旧运行，每个矩阵任务最多执行 20 分钟。所有外部 Action 固定到40位不可变提交 SHA，checkout 不保留Git凭据；Dependabot每周检查GitHub Actions和根目录Python依赖，最多同时提出5个更新PR。
 
-本地执行与 CI 完全相同的核心验收：
+本地执行与 CI 完全相同的 clean-room 验收（只要求系统 Python，不复用项目 `.venv`）：
 
 ```bash
-python scripts/verify_release.py
+python scripts/verify_cleanroom.py
 ```
 
-该脚本使用当前 Python 解释器完成所有受 Git 跟踪的 Python 文件编译、进程内精确 12 个 MCP 工具注册，并通过官方 MCP 客户端真实启动 `server.py` 子进程、完成 stdio `initialize` 和 `tools/list`。它还检查依赖版本契约、敏感信息与禁止产物、Action不可变SHA，并运行全部离线 pytest。stdio 启动门禁在 30 秒内 fail-closed；整个流程会清空外部 `PYTEST_ADDOPTS`，不会传入 `--run-live`，不会启动浏览器，也不会读取、导出或保存 Cookie。
+bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，随后调用 `scripts/verify_release.py`。统一门禁完成所有受 Git 跟踪的 Python 文件编译、进程内精确 12 工具注册，并通过官方 MCP 客户端从仓库外 cwd 启动真实 `server.py`，完成 stdio `initialize`、`tools/list`、精确参数 Schema 契约、静态地区读取、无效输入 fail-closed、浏览器未启动状态、异常退出、超时清理和 stderr 安全检查。消费端子进程会加载临时网络阻断器，任何意外 socket 连接都会立即失败。门禁还检查依赖版本、敏感信息与禁止产物、Action不可变SHA，并运行全部离线 pytest。整个流程会清空外部 `PYTEST_ADDOPTS`，不会传入 `--run-live`、下载或启动浏览器，也不会读取、导出或保存 Cookie。
 
 ## 工具 (12 个)
 
@@ -213,13 +213,16 @@ auction-mcp/
 ├── gb2260.json          # GB 2260 2020 版 (展示用, 不用于查询)
 ├── gb2260_200712.json   # GB 2260 pre-2013 (阿里 server 实际接受的 vintage)
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
+├── mcp_contract.json    # 12 工具公开参数 Schema 契约
 ├── .github/workflows/ci.yml # Windows/Linux × Python 3.10/3.12/3.14 离线 CI
-├── scripts/verify_release.py # 编译/依赖/敏感信息/产物/12 工具/stdio启动/离线测试统一门禁
+├── scripts/consumer_probe.py # 仓库外 cwd 的真实 MCP 消费端与故障生命周期探针
+├── scripts/verify_cleanroom.py # 全新 venv 安装、pip check 与统一门禁入口
+├── scripts/verify_release.py # 编译/依赖/安全/Schema/stdio/消费端/离线测试门禁
 ├── scripts/manual_live_pc.py # 一次性交互式 PC Live 验收入口
 ├── scripts/manual_live_pc_matrix.py # 一次登录多场景 PC Live 矩阵
 ├── scripts/manual_live_pc_pagination.py # 人工确认关闭的 PC 分页协议发现
 ├── scripts/manual_live_pc_page2.py # 正式 page=2 交互式 PC Live 验收
-└── tests/               # 189 项 pytest (169 项离线 + 20 项 Live 默认跳过)
+└── tests/               # 196 项 pytest (176 项离线 + 20 项 Live 默认跳过)
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -238,6 +241,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 
 ## Roadmap
 
+- [x] **P3.3 clean-room 消费端可靠性** — 每个 CI 矩阵任务从系统 Python 创建仓库外临时 venv，全新安装依赖并执行 `pip check`；独立消费者从非仓库 cwd 完成真实 MCP 握手、12 工具参数 Schema、五个强制断网离线调用、无效输入、异常退出、超时清理和 stderr 边界验证。临时环境在结束后销毁，不复用项目 `.venv`，不下载或启动浏览器
 - [x] **P3.2 MCP stdio 启动可靠性** — 发布门禁除进程内工具清单外，使用官方 MCP 客户端真实启动 `server.py`，在 Windows/Linux 和 Python 3.10/3.12/3.14 上验证 stdio 初始化及精确 12 工具 `tools/list`；启动、协议、超时或工具漂移均 fail-closed，全程离线且不启动浏览器
 - [x] **P2.13-A 远端消费端依赖修正** — 2026-08-02 在全新 Python 3.14.6 环境中发现 `mcp>=1.0` 会解析到不兼容的 MCP 2.0（已移除 `mcp.server.fastmcp`）；依赖范围收紧为 `mcp>=1.0,<2`，并增加发布依赖契约测试，防止干净安装再次跨越不兼容主版本
 - [x] **P2.9-F PC 拍品详情状态修正后 Live 复验** — 2026-08-01 在加载 `84f96b6` 的新非持久化登录会话中，对标的 `1062507630078` 唯一一次正式调用通过：状态规范化为“即将开始”，起拍价、评估价、保证金、加价幅度、拍卖阶段、两个周期、联系人、正文和固定详情 URL 均与真实页面一致，金额、状态、周期、正文、附件和 URL 六项 ready 门禁全部通过；Cookie 未读取、导出或保存，会话关闭后临时配置目录已清理

@@ -163,7 +163,9 @@ def test_ci_workflow_covers_full_cross_platform_matrix_and_gate():
     assert "PIP_NO_INPUT: \"1\"" in workflow
     assert "actions/checkout@v7" not in workflow
     assert "actions/setup-python@v7" not in workflow
-    assert "python scripts/verify_release.py" in workflow
+    assert "python scripts/verify_cleanroom.py" in workflow
+    assert "python scripts/verify_release.py" not in workflow
+    assert "pip install -r requirements.txt" not in workflow
     assert "--run-live" not in workflow
     assert "secrets." not in workflow
 

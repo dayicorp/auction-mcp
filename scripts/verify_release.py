@@ -190,6 +190,29 @@ def verify_dependency_contract() -> dict[str, str]:
     return versions
 
 
+def verify_cleanroom_isolation() -> bool:
+    """Validate the clean-room marker when the outer bootstrapper is active."""
+    if os.environ.get("AUCTION_MCP_CLEANROOM") != "1":
+        return False
+    raw_root = os.environ.get("AUCTION_MCP_CLEANROOM_ROOT")
+    if not raw_root:
+        raise VerificationError("clean-room root marker is missing")
+    clean_root = Path(raw_root).resolve()
+    interpreter_prefix = Path(sys.prefix).resolve()
+    repository_venv = (ROOT / ".venv").resolve()
+    if interpreter_prefix == repository_venv:
+        raise VerificationError("repository .venv reuse is forbidden")
+    if (
+        clean_root != interpreter_prefix
+        and clean_root not in interpreter_prefix.parents
+    ):
+        raise VerificationError("interpreter is outside the declared clean room")
+    working_directory = Path.cwd().resolve()
+    if working_directory == ROOT or ROOT in working_directory.parents:
+        raise VerificationError("release gate must start from an external cwd")
+    return True
+
+
 def verify_forbidden_tracked_paths(paths: Iterable[PurePosixPath]) -> None:
     failures: list[str] = []
     for path in paths:
@@ -334,6 +357,45 @@ def verify_mcp_stdio_startup(
     return actual
 
 
+def verify_consumer_probe(timeout_seconds: float = 45.0) -> None:
+    """Run the independent protocol consumer from outside the repository."""
+    with tempfile.TemporaryDirectory(prefix="auction-mcp-consumer-cwd-") as temp:
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env["PYTEST_ADDOPTS"] = ""
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "consumer_probe.py"),
+                    "--repo-root",
+                    str(ROOT),
+                    "--contract",
+                    str(ROOT / "mcp_contract.json"),
+                ],
+                cwd=temp,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VerificationError(
+                f"clean-room consumer timed out after {timeout_seconds:g}s"
+            ) from exc
+    if completed.stdout:
+        print(completed.stdout.rstrip())
+    if completed.returncode != 0:
+        detail_lines = (completed.stderr or completed.stdout).strip().splitlines()
+        detail = detail_lines[-1] if detail_lines else "no diagnostic output"
+        raise VerificationError(
+            f"clean-room consumer failed ({completed.returncode}): {detail}"
+        )
+
+
 def offline_pytest_command() -> list[str]:
     return [
         sys.executable,
@@ -355,6 +417,9 @@ def run_offline_tests() -> None:
 
 def main() -> int:
     try:
+        if verify_cleanroom_isolation():
+            print("[PASS] clean-room interpreter and external cwd isolation")
+
         paths = tracked_files()
         verify_forbidden_tracked_paths(paths)
         print(f"[PASS] forbidden tracked artifacts ({len(paths)} files)")
@@ -382,6 +447,9 @@ def main() -> int:
             "[PASS] MCP stdio startup "
             f"(initialize + {len(stdio_tools)} exact tools)"
         )
+
+        verify_consumer_probe()
+        print("[PASS] clean-room MCP consumer contract and lifecycle")
 
         run_offline_tests()
         print("[PASS] full offline pytest suite")
