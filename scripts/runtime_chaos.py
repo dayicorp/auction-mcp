@@ -109,6 +109,10 @@ class GuardEnvironment:
         with self._lock:
             self._processes.discard(process)
 
+    def active_process_count(self) -> int:
+        with self._lock:
+            return len(self._processes)
+
     def verify(self) -> None:
         if self.cwd == ROOT or ROOT in self.cwd.parents:
             raise ReliabilityError("runtime cwd is not external to repository")
@@ -159,6 +163,8 @@ class _WindowsJob:
     BASIC_ACCOUNTING_INFORMATION = 1
     BASIC_PROCESS_ID_LIST = 3
     EXTENDED_LIMIT_INFORMATION = 9
+    _counter_lock = threading.Lock()
+    _open_handles = 0
 
     def __init__(self) -> None:
         if os.name != "nt":
@@ -271,6 +277,13 @@ class _WindowsJob:
         self._accounting_type = BasicAccountingInformation
         self._process_id_list_type = BasicProcessIdList
         self._handle = handle
+        with self._counter_lock:
+            type(self)._open_handles += 1
+
+    @classmethod
+    def open_handle_count(cls) -> int:
+        with cls._counter_lock:
+            return cls._open_handles
 
     def assign(self, process: subprocess.Popen[bytes]) -> None:
         if self._handle is None:
@@ -348,8 +361,13 @@ class _WindowsJob:
 
     def close(self) -> None:
         if self._handle is not None:
-            self._kernel32.CloseHandle(self._handle)
+            if not self._kernel32.CloseHandle(self._handle):
+                raise ReliabilityError(
+                    f"CloseHandle failed with WinError {self._ctypes.get_last_error()}"
+                )
             self._handle = None
+            with self._counter_lock:
+                type(self)._open_handles -= 1
 
 
 class RawMCPProcess:
@@ -731,6 +749,83 @@ def _resource_count() -> int | None:
     return None
 
 
+def _resource_snapshot(guard: GuardEnvironment, stage: str) -> dict[str, Any]:
+    threads = threading.enumerate()
+    thread_names = sorted(thread.name for thread in threads)
+    return {
+        "active_mcp_processes": guard.active_process_count(),
+        "mcp_io_threads": sum(
+            name.startswith(("mcp-stdout-", "mcp-stderr-")) for name in thread_names
+        ),
+        "open_windows_job_handles": (
+            _WindowsJob.open_handle_count() if os.name == "nt" else 0
+        ),
+        "python_thread_count": len(threads),
+        "python_thread_names": thread_names,
+        "resource_count": _resource_count(),
+        "stage": stage,
+    }
+
+
+def _settled_resource_snapshot(
+    guard: GuardEnvironment, stage: str
+) -> dict[str, Any]:
+    samples: list[int | None] = []
+    snapshot: dict[str, Any] = {}
+    for index in range(3):
+        gc.collect()
+        snapshot = _resource_snapshot(guard, stage)
+        samples.append(snapshot["resource_count"])
+        if index < 2:
+            threading.Event().wait(0.05)
+    snapshot["resource_count_samples"] = samples
+    return snapshot
+
+
+def _assert_resource_owners_reaped(snapshot: dict[str, Any]) -> None:
+    leaked = {
+        key: snapshot[key]
+        for key in (
+            "active_mcp_processes",
+            "mcp_io_threads",
+            "open_windows_job_handles",
+        )
+        if snapshot[key]
+    }
+    if leaked:
+        raise ReliabilityError(
+            f"tracked resource owners survived {snapshot['stage']}: {leaked!r}"
+        )
+
+
+def _resource_delta(
+    after: dict[str, Any], before: dict[str, Any]
+) -> int | None:
+    after_count = after["resource_count"]
+    before_count = before["resource_count"]
+    if after_count is None or before_count is None:
+        return None
+    return after_count - before_count
+
+
+def _warm_concurrency_runtime(workers: int) -> list[str]:
+    """Force all worker threads to exist once before the stable baseline."""
+    barrier = threading.Barrier(workers)
+
+    def warm_worker() -> str:
+        barrier.wait(timeout=10)
+        return threading.current_thread().name
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(warm_worker) for _ in range(workers)]
+        names = {future.result() for future in futures}
+    if len(names) != workers:
+        raise ReliabilityError(
+            f"concurrency warmup created {len(names)} workers, expected {workers}"
+        )
+    return sorted(names)
+
+
 def _lingering_process_groups(parent_pids: set[int]) -> set[int]:
     """Return live POSIX sessions belonging to completed server processes."""
     lingering: set[int] = set()
@@ -803,17 +898,14 @@ def _stress_lifecycle(guard: GuardEnvironment) -> tuple[int, float]:
         raise
 
 
-def run_process_stress(
+def _run_stress_round(
     guard: GuardEnvironment,
     *,
     sequential: int,
     workers: int,
     per_worker: int,
-) -> dict[str, Any]:
-    if sequential < 100 or workers < 8 or per_worker < 20:
-        raise ReliabilityError("stress counts are below the P3.4 acceptance floor")
-    before_resources = _resource_count()
-    started = time.monotonic()
+    round_index: int,
+) -> list[tuple[int, float]]:
     records: list[tuple[int, float]] = []
 
     for index in range(sequential):
@@ -821,7 +913,8 @@ def run_process_stress(
             records.append(_stress_lifecycle(guard))
         except Exception as exc:
             raise ReliabilityError(
-                f"sequential lifecycle {index + 1}/{sequential} failed: {exc}"
+                f"round {round_index} sequential lifecycle "
+                f"{index + 1}/{sequential} failed: {exc}"
             ) from exc
 
     def worker(worker_index: int) -> list[tuple[int, float]]:
@@ -831,7 +924,8 @@ def run_process_stress(
                 worker_records.append(_stress_lifecycle(guard))
             except Exception as exc:
                 raise ReliabilityError(
-                    f"worker {worker_index} lifecycle {iteration + 1}/{per_worker} failed: {exc}"
+                    f"round {round_index} worker {worker_index} lifecycle "
+                    f"{iteration + 1}/{per_worker} failed: {exc}"
                 ) from exc
         return worker_records
 
@@ -839,26 +933,86 @@ def run_process_stress(
         futures = [executor.submit(worker, index + 1) for index in range(workers)]
         for future in concurrent.futures.as_completed(futures):
             records.extend(future.result())
+    return records
 
-    gc.collect()
-    after_resources = _resource_count()
-    resource_delta = (
-        None
-        if before_resources is None or after_resources is None
-        else after_resources - before_resources
-    )
-    if resource_delta is not None and resource_delta > 8:
-        raise ReliabilityError(
-            f"parent process resource count leaked by {resource_delta}"
+
+def run_process_stress(
+    guard: GuardEnvironment,
+    *,
+    sequential: int,
+    workers: int,
+    per_worker: int,
+    rounds: int = 2,
+) -> dict[str, Any]:
+    if sequential < 100 or workers < 8 or per_worker < 20 or rounds < 2:
+        raise ReliabilityError("stress counts are below the P3.5 acceptance floor")
+
+    started = time.monotonic()
+    cold = _settled_resource_snapshot(guard, "cold")
+    _assert_resource_owners_reaped(cold)
+    warmup_worker_names = _warm_concurrency_runtime(workers)
+    warmed = _settled_resource_snapshot(guard, "warmed")
+    _assert_resource_owners_reaped(warmed)
+    warmup_delta = _resource_delta(warmed, cold)
+
+    resource_stages = [cold, warmed]
+    round_resource_deltas: list[int | None] = []
+    round_duration_seconds: list[float] = []
+    records: list[tuple[int, float]] = []
+    previous = warmed
+    per_round_expected = sequential + workers * per_worker
+
+    for round_index in range(1, rounds + 1):
+        round_started = time.monotonic()
+        round_records = _run_stress_round(
+            guard,
+            sequential=sequential,
+            workers=workers,
+            per_worker=per_worker,
+            round_index=round_index,
         )
-    expected = sequential + workers * per_worker
+        if len(round_records) != per_round_expected:
+            raise ReliabilityError(
+                f"round {round_index} stress lifecycle accounting mismatch"
+            )
+        records.extend(round_records)
+        round_duration_seconds.append(round(time.monotonic() - round_started, 3))
+
+        stage = _settled_resource_snapshot(guard, f"after_round_{round_index}")
+        _assert_resource_owners_reaped(stage)
+        delta = _resource_delta(stage, previous)
+        round_resource_deltas.append(delta)
+        if delta is not None and delta > 8:
+            raise ReliabilityError(
+                f"round {round_index} parent process resource count leaked by {delta}"
+            )
+        if round_index > 1:
+            stage_count = stage["resource_count"]
+            previous_count = previous["resource_count"]
+            warmed_count = warmed["resource_count"]
+            if (
+                stage_count is not None
+                and previous_count is not None
+                and warmed_count is not None
+                and stage_count > previous_count
+                and stage_count > warmed_count
+            ):
+                raise ReliabilityError(
+                    "parent process resources continued growing after warmup: "
+                    f"{previous_count} -> {stage_count}"
+                )
+        resource_stages.append(stage)
+        previous = stage
+
+    expected = per_round_expected * rounds
     if len(records) != expected:
         raise ReliabilityError("stress lifecycle accounting mismatch")
+    resource_delta = _resource_delta(resource_stages[-1], warmed)
     lifecycle_seconds = sorted(duration for _, duration in records)
     p95_index = max(0, int(len(lifecycle_seconds) * 0.95) - 1)
 
     return {
-        "concurrent_lifecycles": workers * per_worker,
+        "concurrent_lifecycles": workers * per_worker * rounds,
         "browser_started": False,
         "duration_seconds": round(time.monotonic() - started, 3),
         "external_cwd": True,
@@ -867,10 +1021,18 @@ def run_process_stress(
         "network_blocked": True,
         "max_lifecycle_seconds": round(max(lifecycle_seconds), 3),
         "parent_resource_delta": resource_delta,
+        "per_round_lifecycles": per_round_expected,
         "p95_lifecycle_seconds": round(lifecycle_seconds[p95_index], 3),
         "processes_reaped": expected,
+        "resource_growth_stable": True,
+        "resource_stages": resource_stages,
         "response_timeout_seconds": STRESS_RESPONSE_TIMEOUT_SECONDS,
-        "sequential_lifecycles": sequential,
+        "round_duration_seconds": round_duration_seconds,
+        "round_resource_deltas": round_resource_deltas,
+        "rounds": rounds,
+        "sequential_lifecycles": sequential * rounds,
+        "warmup_resource_delta": warmup_delta,
+        "warmup_worker_names": warmup_worker_names,
         "workers": workers,
     }
 
@@ -881,6 +1043,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sequential", type=int, default=100)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--per-worker", type=int, default=20)
+    parser.add_argument("--rounds", type=int, default=2)
     return parser.parse_args()
 
 
@@ -901,6 +1064,7 @@ def main() -> int:
                     sequential=arguments.sequential,
                     workers=arguments.workers,
                     per_worker=arguments.per_worker,
+                    rounds=arguments.rounds,
                 )
     except Exception as exc:
         diagnostic["error"] = f"{type(exc).__name__}: {exc}"

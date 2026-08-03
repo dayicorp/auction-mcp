@@ -75,7 +75,7 @@ jobs:
       - name: Install offline reliability dependencies
         run: python -m pip install --no-input -r requirements.txt
 
-      - name: Run raw protocol chaos and 260 lifecycle stress gate
+      - name: Run raw protocol chaos and 520 lifecycle resource-stability gate
         run: python scripts/runtime_chaos.py --mode all
 
   mutation-coverage:
