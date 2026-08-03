@@ -83,6 +83,11 @@ def test_release_gate_dependency_contract_matches_repository():
         "pytest>=8.0",
         "coverage>=7.10,<8",
     }
+    assert release_gate._normalized_build_requirements() == {
+        "build==1.5.0",
+        "setuptools==83.0.0",
+        "wheel==0.47.0",
+    }
 
 
 @pytest.mark.parametrize(
@@ -188,6 +193,7 @@ def test_ci_workflow_covers_full_cross_platform_matrix_and_gate():
     assert "Runtime stress / ${{ matrix.os }}" in workflow
     assert "Mutation and coverage / Ubuntu / Python 3.12" in workflow
     assert "timeout-minutes: 45" in workflow
+    assert "timeout-minutes: 35" in workflow
     assert "timeout-minutes: 30" in workflow
     assert "python -m pip install --no-input -r requirements.txt" in workflow
     assert "--run-live" not in workflow

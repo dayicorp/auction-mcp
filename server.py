@@ -901,5 +901,10 @@ def jd_get_supported_areas(province: str | None = None,
 
 # ============================================================ entry
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run the stdio server for source and installed console entrypoints."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

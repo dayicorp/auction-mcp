@@ -61,7 +61,9 @@ def test_checked_contract_matches_current_server_schema():
 
     tools = asyncio.run(server.mcp.list_tools())
     expected = json.loads(
-        (ROOT / "mcp_contract.json").read_text(encoding="utf-8")
+        (ROOT / "auction_mcp_assets" / "mcp_contract.json").read_text(
+            encoding="utf-8"
+        )
     )["tools"]
     assert probe.tool_contract(tools) == expected
 

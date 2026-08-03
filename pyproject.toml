@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "auction-mcp"
+version = "0.1.0"
+description = "MCP server for aggregated Ali and JD judicial-auction search"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "auction-mcp contributors"}]
+dependencies = [
+  "mcp>=1.0,<2",
+  "httpx>=0.27",
+  "playwright>=1.50,<2",
+]
+
+[project.scripts]
+auction-mcp = "server:main"
+
+[tool.setuptools]
+packages = ["auction_mcp_assets"]
+py-modules = [
+  "ali_h5_client",
+  "ali_pc_browser_client",
+  "jd_h5_client",
+  "safety_core",
+  "server",
+]
+include-package-data = false
+
+[tool.setuptools.package-data]
+auction_mcp_assets = ["*.json"]

@@ -26,6 +26,9 @@ gate = _load_gate()
 
 
 def test_raw_protocol_chaos_runs_in_real_external_processes():
+    overall_timeout = 7 * (
+        gate.CHAOS_RESPONSE_TIMEOUT_SECONDS + gate.CHAOS_EXIT_TIMEOUT_SECONDS
+    )
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), "--mode", "chaos"],
         cwd=ROOT,
@@ -34,13 +37,23 @@ def test_raw_protocol_chaos_runs_in_real_external_processes():
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=90,
+        timeout=overall_timeout,
     )
     assert completed.returncode == 0, completed.stderr
     assert "RUNTIME_RELIABILITY: PASS" in completed.stdout
     assert '"lifecycle_count": 7' in completed.stdout
     assert '"network_blocked": true' in completed.stdout
     assert '"stdout_protocol_clean": true' in completed.stdout
+    assert '"early_eof": "ready_then_bounded_exit"' in completed.stdout
+
+
+def test_successful_lifecycle_unregisters_after_containment_check():
+    with gate.GuardEnvironment() as guard:
+        process = gate.RawMCPProcess(guard)
+        gate.initialize(process)
+        returncode, _ = process.finish()
+        assert returncode == 0
+        assert guard.active_process_count() == 0
 
 
 @pytest.mark.parametrize(
@@ -70,6 +83,8 @@ def test_runtime_stress_contains_no_sleep_based_soak():
     assert "CHAOS_RESPONSE_TIMEOUT_SECONDS = 30.0" in source
     assert "CHAOS_EXIT_TIMEOUT_SECONDS = 10.0" in source
     assert "PROCESS_REAP_TIMEOUT_SECONDS = 1.0" in source
+    assert "RUNTIME_STRESS_CHECKPOINT=" in source
+    assert "stderr_sha256" in source
     assert gate.initialize.__kwdefaults__["timeout"] == 30.0
 
 

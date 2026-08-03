@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import gc
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -693,12 +694,16 @@ def run_protocol_chaos(guard: GuardEnvironment) -> dict[str, Any]:
     scenarios["malformed_json"] = "error_notification_then_recovered"
 
     early_eof = RawMCPProcess(guard)
-    early_eof.write(b'{"jsonrpc":"2.0","id":1,"method":"initialize"')
+    # Separate server readiness from EOF cleanup. Starting the exit clock while
+    # a fresh interpreter is still importing dependencies makes cold filesystem
+    # or antivirus latency look like a protocol leak.
+    initialize(early_eof)
+    early_eof.write(b'{"jsonrpc":"2.0","id":2,"method":"ping"')
     returncode, eof_seconds = finish_scenario(early_eof, "early_eof")
     early_eof.validate_output()
     if eof_seconds > CHAOS_EXIT_TIMEOUT_SECONDS or returncode not in {0, 1}:
         raise ReliabilityError("early EOF cleanup contract failed")
-    scenarios["early_eof"] = "bounded_exit"
+    scenarios["early_eof"] = "ready_then_bounded_exit"
 
     timeout = RawMCPProcess(guard)
     initialize(timeout)
@@ -850,14 +855,26 @@ def _stress_lifecycle(guard: GuardEnvironment) -> tuple[int, float]:
         try:
             initialize(process, timeout=STRESS_RESPONSE_TIMEOUT_SECONDS)
         except TimeoutError as exc:
-            raise ReliabilityError("initialize stage timed out") from exc
+            raise ReliabilityError(
+                "initialize stage timed out: "
+                + json.dumps(
+                    _timeout_diagnostic(process, guard, started, "initialize"),
+                    sort_keys=True,
+                )
+            ) from exc
         process.send(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
         )
         try:
             tools_response = process.read(timeout=STRESS_RESPONSE_TIMEOUT_SECONDS)
         except TimeoutError as exc:
-            raise ReliabilityError("tools/list stage timed out") from exc
+            raise ReliabilityError(
+                "tools/list stage timed out: "
+                + json.dumps(
+                    _timeout_diagnostic(process, guard, started, "tools/list"),
+                    sort_keys=True,
+                )
+            ) from exc
         tools = {
             item.get("name")
             for item in ((tools_response.get("result") or {}).get("tools") or [])
@@ -875,7 +892,13 @@ def _stress_lifecycle(guard: GuardEnvironment) -> tuple[int, float]:
         try:
             status_response = process.read(timeout=STRESS_RESPONSE_TIMEOUT_SECONDS)
         except TimeoutError as exc:
-            raise ReliabilityError("tools/call stage timed out") from exc
+            raise ReliabilityError(
+                "tools/call stage timed out: "
+                + json.dumps(
+                    _timeout_diagnostic(process, guard, started, "tools/call"),
+                    sort_keys=True,
+                )
+            ) from exc
         result = status_response.get("result") or {}
         if result.get("isError") is True:
             raise ReliabilityError("offline status call failed during stress")
@@ -898,6 +921,65 @@ def _stress_lifecycle(guard: GuardEnvironment) -> tuple[int, float]:
         raise
 
 
+def _timeout_diagnostic(
+    process: RawMCPProcess,
+    guard: GuardEnvironment,
+    started: float,
+    stage: str,
+) -> dict[str, Any]:
+    """Return bounded, non-secret process evidence for a stress timeout."""
+    stderr = b"".join(process.stderr_chunks)
+    if process._windows_job is not None:
+        try:
+            contained_pids = list(process._windows_job.active_process_ids())
+        except ReliabilityError:
+            contained_pids = ["query_failed"]
+    else:
+        contained_pids = [process.pid] if process.process.poll() is None else []
+    return {
+        "active_guard_processes": guard.active_process_count(),
+        "contained_process_ids": contained_pids,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "mcp_io_threads": _mcp_io_thread_names(),
+        "open_windows_job_handles": _WindowsJob.open_handle_count(),
+        "parent_resource_count": _resource_count(),
+        "process_returncode": process.process.poll(),
+        "stage": stage,
+        "stderr_bytes": len(stderr),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+        "stdout_messages": len(process.stdout_lines),
+    }
+
+
+def _stress_checkpoint(
+    guard: GuardEnvironment,
+    *,
+    round_index: int,
+    phase: str,
+    completed: int,
+    records: list[tuple[int, float]],
+) -> None:
+    snapshot = _resource_snapshot(
+        guard, f"round_{round_index}_{phase}_{completed}"
+    )
+    _assert_resource_owners_reaped(snapshot)
+    durations = [duration for _, duration in records]
+    print(
+        "RUNTIME_STRESS_CHECKPOINT="
+        + json.dumps(
+            {
+                "completed": completed,
+                "max_lifecycle_seconds": round(max(durations), 3),
+                "phase": phase,
+                "resource_count": snapshot["resource_count"],
+                "round": round_index,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def _run_stress_round(
     guard: GuardEnvironment,
     *,
@@ -916,6 +998,14 @@ def _run_stress_round(
                 f"round {round_index} sequential lifecycle "
                 f"{index + 1}/{sequential} failed: {exc}"
             ) from exc
+        if (index + 1) % 25 == 0:
+            _stress_checkpoint(
+                guard,
+                round_index=round_index,
+                phase="sequential",
+                completed=index + 1,
+                records=records,
+            )
 
     def worker(worker_index: int) -> list[tuple[int, float]]:
         worker_records: list[tuple[int, float]] = []
@@ -933,6 +1023,13 @@ def _run_stress_round(
         futures = [executor.submit(worker, index + 1) for index in range(workers)]
         for future in concurrent.futures.as_completed(futures):
             records.extend(future.result())
+    _stress_checkpoint(
+        guard,
+        round_index=round_index,
+        phase="concurrent",
+        completed=workers * per_worker,
+        records=records,
+    )
     return records
 
 

@@ -15,9 +15,11 @@
 完全 bypass app 端 unifiedSign + wua + sgext anti-tamper.
 """
 from __future__ import annotations
-import hashlib, json, os, time
+import hashlib, json, time
 from typing import Any
 import httpx
+
+from auction_mcp_assets import load_json
 
 # GB 2260 国标行政区划数据 - 两份, 用途分明:
 #
@@ -29,12 +31,8 @@ import httpx
 #                  34 省 / 344 市 / 3146 区县. **阿里 server 实际接受的就是这个 vintage**.
 #                  例: 柯桥区(2020=330603) 在阿里实际是 绍兴县(330621); 上虞区(2020=330604) 实际是 上虞市(330682).
 #                  2020 码直接传给阿里 → 静默返回全国乱掺垃圾, 故必须用 legacy 解析查询.
-_GB2260_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gb2260.json")
-_GB2260_LEGACY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gb2260_200712.json")
-with open(_GB2260_PATH, "r", encoding="utf-8") as _f:
-    GB2260: list[dict[str, Any]] = json.load(_f)
-with open(_GB2260_LEGACY_PATH, "r", encoding="utf-8") as _f:
-    GB2260_LEGACY: list[dict[str, Any]] = json.load(_f)
+GB2260: list[dict[str, Any]] = load_json("gb2260.json")
+GB2260_LEGACY: list[dict[str, Any]] = load_json("gb2260_200712.json")
 
 
 def _pad_code(code: str) -> str:

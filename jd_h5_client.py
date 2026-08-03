@@ -12,9 +12,11 @@
 地区: 33 省 / 455 市 / 5344 区县 (jd_areas.json), 区县级用 multiCountyIds 过滤.
 """
 from __future__ import annotations
-import json, os, time
+import json, time
 from typing import Any
 import httpx
+
+from auction_mcp_assets import load_json
 
 API = "https://api.m.jd.com/api"
 MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
@@ -25,9 +27,7 @@ REFERER = "https://pmthr.m.jd.com/dynamic?appletsCode=judicature_search_home"
 # ============================================================ 地区树
 # jd_areas.json 由 getAreaInfoMap 三层级联拉取生成 (一次性, 离线冻结).
 # 结构: [{id, name, children: [{id, name, children: [{id, name}]}]}]
-_AREAS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jd_areas.json")
-with open(_AREAS_PATH, "r", encoding="utf-8") as _f:
-    _AREAS_TREE: list[dict[str, Any]] = json.load(_f)
+_AREAS_TREE: list[dict[str, Any]] = load_json("jd_areas.json")
 
 
 def _build_lookup(tree: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

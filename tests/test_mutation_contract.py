@@ -18,7 +18,9 @@ def test_offline_provider_defaults_remain_fail_closed():
 
 def test_required_item_detail_parameter_stays_required_in_public_contract():
     contract = json.loads(
-        (ROOT / "mcp_contract.json").read_text(encoding="utf-8")
+        (ROOT / "auction_mcp_assets" / "mcp_contract.json").read_text(
+            encoding="utf-8"
+        )
     )
     parameter = contract["tools"]["ali_pc_get_item_detail"]["parameters"][
         "item_id"

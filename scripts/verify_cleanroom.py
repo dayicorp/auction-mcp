@@ -1,8 +1,9 @@
 """Create an isolated environment and run the complete release gate.
 
 The bootstrapper uses only the Python standard library.  It creates a fresh
-temporary venv outside the repository, installs ``requirements.txt``, runs
-``pip check``, and launches the release gate from an unrelated working folder.
+temporary venv outside the repository, installs runtime and pinned build
+requirements, runs ``pip check``, launches the source release gate, then builds
+and consumes reproducible wheel/sdist artifacts from an unrelated folder.
 """
 from __future__ import annotations
 
@@ -107,6 +108,23 @@ def main() -> int:
                 label="install requirements into clean-room venv",
             )
             diagnostic["requirements_installed"] = True
+            diagnostic["stage"] = "install_build_requirements"
+            run_checked(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-input",
+                    "-r",
+                    str(ROOT / "requirements-build.txt"),
+                ],
+                cwd=consumer_cwd,
+                env=env,
+                timeout_seconds=300,
+                label="install pinned build toolchain",
+            )
+            diagnostic["build_requirements_installed"] = True
             diagnostic["stage"] = "pip_check"
             run_checked(
                 [str(python), "-m", "pip", "check"],
@@ -125,6 +143,15 @@ def main() -> int:
                 label="complete release gate from external cwd",
             )
             diagnostic["release_gate"] = "pass"
+            diagnostic["stage"] = "artifact_gate"
+            run_checked(
+                [str(python), str(ROOT / "scripts" / "verify_artifact.py")],
+                cwd=consumer_cwd,
+                env=env,
+                timeout_seconds=900,
+                label="reproducible artifact and installed-consumer gate",
+            )
+            diagnostic["artifact_gate"] = "pass"
     except (OSError, subprocess.SubprocessError, CleanroomError) as exc:
         diagnostic["error"] = f"{type(exc).__name__}: {exc}"
         print(

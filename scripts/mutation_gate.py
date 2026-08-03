@@ -115,7 +115,7 @@ MUTANTS = (
     Mutant(
         "required_tool_parameter_schema_changed",
         "schema_drift",
-        "mcp_contract.json",
+        "auction_mcp_assets/mcp_contract.json",
         '"item_id": {"nullable": false, "required": true, "type": "string"}',
         '"item_id": {"nullable": false, "required": false, "type": "string"}',
         ("tests/test_consumer_probe.py", "tests/test_mutation_contract.py"),

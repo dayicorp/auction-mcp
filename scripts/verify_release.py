@@ -28,6 +28,12 @@ EXPECTED_REQUIREMENTS = {
     "coverage>=7.10,<8",
 }
 
+EXPECTED_BUILD_REQUIREMENTS = {
+    "build==1.5.0",
+    "setuptools==83.0.0",
+    "wheel==0.47.0",
+}
+
 EXPECTED_MCP_TOOLS = {
     "ali_get_filter_options",
     "ali_get_supported_areas",
@@ -162,6 +168,17 @@ def _normalized_requirements() -> set[str]:
     }
 
 
+def _normalized_build_requirements() -> set[str]:
+    lines = (ROOT / "requirements-build.txt").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    return {
+        line.split("#", 1)[0].strip().replace(" ", "")
+        for line in lines
+        if line.split("#", 1)[0].strip()
+    }
+
+
 def _version_tuple(value: str) -> tuple[int, ...]:
     match = re.match(r"^(\d+(?:\.\d+)*)", value)
     if not match:
@@ -177,10 +194,26 @@ def verify_dependency_contract() -> dict[str, str]:
             f"expected={sorted(EXPECTED_REQUIREMENTS)!r}, "
             f"actual={sorted(actual_requirements)!r}"
         )
+    actual_build_requirements = _normalized_build_requirements()
+    if actual_build_requirements != EXPECTED_BUILD_REQUIREMENTS:
+        raise VerificationError(
+            "build requirements contract mismatch: "
+            f"expected={sorted(EXPECTED_BUILD_REQUIREMENTS)!r}, "
+            f"actual={sorted(actual_build_requirements)!r}"
+        )
 
     versions = {
         name: importlib.metadata.version(name)
-        for name in ("mcp", "httpx", "playwright", "pytest", "coverage")
+        for name in (
+            "mcp",
+            "httpx",
+            "playwright",
+            "pytest",
+            "coverage",
+            "build",
+            "setuptools",
+            "wheel",
+        )
     }
     if _version_tuple(versions["mcp"])[0] != 1:
         raise VerificationError(f"MCP must remain on 1.x, got {versions['mcp']}")
@@ -196,6 +229,15 @@ def verify_dependency_contract() -> dict[str, str]:
         raise VerificationError(
             f"coverage must be >=7.10,<8, got {versions['coverage']}"
         )
+    for name, expected in {
+        "build": "1.5.0",
+        "setuptools": "83.0.0",
+        "wheel": "0.47.0",
+    }.items():
+        if versions[name] != expected:
+            raise VerificationError(
+                f"{name} build tool must be exactly {expected}, got {versions[name]}"
+            )
     return versions
 
 
@@ -380,7 +422,7 @@ def verify_consumer_probe(timeout_seconds: float = 45.0) -> None:
                     "--repo-root",
                     str(ROOT),
                     "--contract",
-                    str(ROOT / "mcp_contract.json"),
+                    str(ROOT / "auction_mcp_assets" / "mcp_contract.json"),
                 ],
                 cwd=temp,
                 env=env,

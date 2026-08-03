@@ -1,8 +1,8 @@
-"""End-to-end offline MCP consumer probe for a clean checkout.
+"""End-to-end offline MCP consumer probe for source or an installed wheel.
 
 This script is deliberately runnable from outside the repository.  It starts
-the real ``server.py`` over stdio, verifies the public schema contract, calls
-only offline-safe tools, and exercises crash and timeout lifecycle handling.
+the real stdio entrypoint, verifies the public schema contract, calls only
+offline-safe tools, and exercises crash and timeout lifecycle handling.
 """
 from __future__ import annotations
 
@@ -129,6 +129,21 @@ def load_contract(path: Path) -> dict[str, Any]:
     return document["tools"]
 
 
+def load_installed_contract() -> dict[str, Any]:
+    """Load the public contract from the installed distribution resource."""
+    try:
+        from auction_mcp_assets import load_json
+
+        document = load_json("mcp_contract.json")
+    except (ImportError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ConsumerProbeError(
+            f"cannot read installed MCP contract: {exc}"
+        ) from exc
+    if document.get("version") != 1 or not isinstance(document.get("tools"), dict):
+        raise ConsumerProbeError("unsupported installed MCP contract document")
+    return document["tools"]
+
+
 def _assert_contract(actual: dict[str, Any], expected: dict[str, Any]) -> None:
     actual_names = set(actual)
     expected_names = set(expected)
@@ -231,7 +246,12 @@ async def _expect_initialization_failure(
     return time.monotonic() - started
 
 
-async def run_probe(repo_root: Path, contract_path: Path) -> dict[str, Any]:
+async def run_probe(
+    repo_root: Path,
+    contract_path: Path | None,
+    *,
+    installed: bool = False,
+) -> dict[str, Any]:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
@@ -239,7 +259,28 @@ async def run_probe(repo_root: Path, contract_path: Path) -> dict[str, Any]:
     consumer_cwd = Path.cwd().resolve()
     if consumer_cwd == repo_root or repo_root in consumer_cwd.parents:
         raise ConsumerProbeError("consumer probe must run outside the repository")
-    expected_contract = load_contract(contract_path)
+    expected_contract = (
+        load_installed_contract()
+        if installed
+        else load_contract(contract_path or repo_root / "auction_mcp_assets" / "mcp_contract.json")
+    )
+
+    if installed:
+        import importlib.util
+
+        server_spec = importlib.util.find_spec("server")
+        if server_spec is None or server_spec.origin is None:
+            raise ConsumerProbeError("installed server module is unavailable")
+        server_origin = Path(server_spec.origin).resolve()
+        if server_origin == repo_root or repo_root in server_origin.parents:
+            raise ConsumerProbeError("installed probe resolved server from source checkout")
+        executable_name = "auction-mcp.exe" if os.name == "nt" else "auction-mcp"
+        entrypoint = Path(sys.executable).resolve().parent / executable_name
+        if not entrypoint.is_file():
+            raise ConsumerProbeError("installed auction-mcp entrypoint is unavailable")
+    else:
+        server_origin = (repo_root / "server.py").resolve()
+        entrypoint = Path(sys.executable).resolve()
 
     with tempfile.TemporaryDirectory(prefix="auction-mcp-consumer-stderr-") as temp:
         guard_root = Path(temp)
@@ -248,13 +289,14 @@ async def run_probe(repo_root: Path, contract_path: Path) -> dict[str, Any]:
             NETWORK_GUARD_SOURCE, encoding="utf-8"
         )
         server_env = os.environ.copy()
-        server_env["PYTHONPATH"] = os.pathsep.join(
-            [str(guard_root), str(repo_root)]
-        )
+        python_paths = [str(guard_root)]
+        if not installed:
+            python_paths.append(str(repo_root))
+        server_env["PYTHONPATH"] = os.pathsep.join(python_paths)
         verify_network_guard(server_env, consumer_cwd)
         parameters = StdioServerParameters(
-            command=sys.executable,
-            args=[str(repo_root / "server.py")],
+            command=str(entrypoint),
+            args=[] if installed else [str(repo_root / "server.py")],
             cwd=consumer_cwd,
             env=server_env,
         )
@@ -348,9 +390,13 @@ async def run_probe(repo_root: Path, contract_path: Path) -> dict[str, Any]:
         "browser_started": False,
         "consumer_cwd_outside_repo": True,
         "crash_failure_seconds": round(crash_seconds, 3),
+        "distribution": "installed-wheel" if installed else "source-checkout",
         "mcp_protocol": initialized.protocolVersion,
         "network_blocked": True,
         "offline_calls": 5,
+        "server_outside_source_checkout": (
+            server_origin != repo_root and repo_root not in server_origin.parents
+        ),
         "stderr_bytes": len(stderr_data),
         "timeout_failure_seconds": round(timeout_seconds, 3),
         "tools": len(expected_contract),
@@ -361,17 +407,27 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--contract", type=Path)
+    parser.add_argument("--installed", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     arguments = parse_args()
     repo_root = arguments.repo_root.resolve()
-    contract = (arguments.contract or repo_root / "mcp_contract.json").resolve()
+    contract = (
+        arguments.contract.resolve()
+        if arguments.contract
+        else repo_root / "auction_mcp_assets" / "mcp_contract.json"
+    )
     try:
         result = asyncio.run(
             asyncio.wait_for(
-                run_probe(repo_root, contract), timeout=DEFAULT_TIMEOUT_SECONDS
+                run_probe(
+                    repo_root,
+                    None if arguments.installed else contract,
+                    installed=arguments.installed,
+                ),
+                timeout=DEFAULT_TIMEOUT_SECONDS,
             )
         )
     except Exception as exc:

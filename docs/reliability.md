@@ -1,4 +1,4 @@
-# P3.4/P3.5 运行时可靠性、资源归因与故障诊断
+# P3.4-P3.6 运行时、资源与发布制品可靠性诊断
 
 三项门禁均为离线、跨工作目录、无浏览器流程。它们不会传入
 `--run-live`，不会读取 Cookie、Token 或浏览器状态，也不会访问外部网络。
@@ -21,6 +21,17 @@ Windows 的每个生命周期另有独立 Job Object，并以 Job 内核成员�
 时用 `KILL_ON_JOB_CLOSE` 回收整棵树。父进程退出后最多用 1 秒等待 Job accounting
 归零；超时会报告 Job 内真实 PID 并硬失败。Linux 使用每进程独立
 session/process group，并在退出后验证进程组不存在。
+
+`early_eof` 先完成真实 initialize 与 initialized notification，再对下一条 ping
+写入半包并关闭 stdin。只有服务器已就绪后才开始10秒退出计时，因此冷解释器、
+文件系统或杀毒扫描的启动抖动不会被误报为 EOF 泄漏；进程退出后仍必须完成
+stdout/stderr 边界、Windows Job 或 POSIX process group 清空以及 guard 注销。
+
+压力阶段每完成25个顺序生命周期、以及每个并发 worker 的20个生命周期，就输出
+`RUNTIME_STRESS_CHECKPOINT`。它记录轮次、阶段、累计数、最慢生命周期和当前父
+进程资源数，并再次要求 MCP 进程、I/O线程和 Job 句柄为零。若任一协议阶段超过
+原30秒阈值，失败诊断会报告进程状态、Job内PID、资源数、线程名、stdout消息数
+以及 stderr 长度和 SHA-256；不直接回显 stderr 内容，避免诊断本身泄露敏感数据。
 
 P3.5 资源门禁先记录 `cold`，强制同时创建并关闭 8 个 ThreadPool worker 后
 记录 `warmed`，再分别记录 `after_round_1` 和 `after_round_2`。每个阶段包含总
@@ -71,5 +82,32 @@ python scripts/mutation_gate.py
 
 所有九个任务必须 success；压力或变异任务仅触发不代表完成。
 六个 clean-room 任务还会分别输出 `RELEASE_DIAGNOSTIC` 与
-`CLEANROOM_DIAGNOSTIC`；失败 JSON 的 `stage` 是精确失败阶段，成功时均为
-`complete`，且 clean-room 必须报告 `temporary_environment_removed: true`。
+`ARTIFACT_DIAGNOSTIC`、`CLEANROOM_DIAGNOSTIC`；失败 JSON 的 `stage` 是精确
+失败阶段，成功时均为 `complete`，且 clean-room 必须报告
+`temporary_environment_removed: true`。
+
+## 可复现制品与安装消费端
+
+```bash
+python scripts/verify_artifact.py
+```
+
+该门禁要求 `build==1.5.0`、`setuptools==83.0.0`、`wheel==0.47.0`，从显式
+源码白名单创建两个互不复用的构建树。仓库内 PEP 517 后端固定 sdist 的
+gzip/tar 时间、uid/gid、用户名、权限和成员顺序；wheel 与 sdist 的文件名和
+SHA-256 必须分别一致。归档不得包含 tests、scripts、Live、缓存、浏览器状态或密钥类文件。
+wheel 必须包含五个运行模块、四份 JSON 资源、MIT 许可证、Python >=3.10
+元数据、三项运行依赖以及唯一 `auction-mcp = server:main` 入口。
+
+构建审计后，门禁创建第三个 venv，直接安装 wheel 及其声明依赖并运行
+`pip check`。安装后的 `server` 与 `auction_mcp_assets` 必须来自该 venv，不能
+回退到源码仓库；随后从外部 cwd 调用控制台入口，在 socket 强制断网下完成真实
+MCP initialize、tools/list、12工具 Schema、五个安全调用、stderr 和异常/超时
+回收检查。
+
+常见错误：
+
+- `bytes are not reproducible`：检查构建时钟、文件顺序或后端漂移；不得只比较解包内容掩盖不可复现字节。
+- `forbidden distribution members`：收紧 `MANIFEST.in` 或 package-data；不得用忽略规则跳过敏感制品。
+- `source-checkout import leakage`：安装入口仍依赖仓库 `PYTHONPATH`；修复打包资源或模块声明。
+- `installed consumer ... failed`：先看同一输出中的 `ARTIFACT_DIAGNOSTIC.stage`，再按安装、契约、协议或断网阶段定位。

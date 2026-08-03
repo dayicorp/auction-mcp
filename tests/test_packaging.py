@@ -1,5 +1,6 @@
-"""发布依赖契约测试（零网络）。"""
+"""发布与安装元数据契约测试（零网络）。"""
 
+import json
 from pathlib import Path
 
 
@@ -11,3 +12,29 @@ def test_mcp_requirement_keeps_fastmcp_compatible_major():
 
     normalized = {line.strip().replace(" ", "") for line in requirements}
     assert "mcp>=1.0,<2" in normalized
+
+
+def test_pyproject_exposes_supported_console_entrypoint_and_runtime_only_deps():
+    pyproject = (
+        Path(__file__).resolve().parents[1] / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    assert 'requires-python = ">=3.10"' in pyproject
+    assert 'auction-mcp = "server:main"' in pyproject
+    assert '"mcp>=1.0,<2"' in pyproject
+    assert '"httpx>=0.27"' in pyproject
+    assert '"playwright>=1.50,<2"' in pyproject
+    assert "pytest" not in pyproject
+    assert "coverage" not in pyproject
+
+
+def test_packaged_contract_and_region_assets_are_valid_json():
+    assets = Path(__file__).resolve().parents[1] / "auction_mcp_assets"
+    expected = {
+        "gb2260.json",
+        "gb2260_200712.json",
+        "jd_areas.json",
+        "mcp_contract.json",
+    }
+    assert {path.name for path in assets.glob("*.json")} == expected
+    for name in expected:
+        assert json.loads((assets / name).read_text(encoding="utf-8"))
