@@ -1,0 +1,19 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include requirements.txt
+include requirements-build.txt
+include build_backend.py
+include ali_h5_client.py
+include ali_pc_browser_client.py
+include asset_analysis.py
+include beike_browser_client.py
+include evidence_bundle.py
+include evidence_cli.py
+include evidence_safety.py
+include jd_h5_client.py
+include safety_core.py
+include server.py
+recursive-include auction_mcp_assets *.py *.json
+global-exclude *.py[cod]
+global-exclude __pycache__

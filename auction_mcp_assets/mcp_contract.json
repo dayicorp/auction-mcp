@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "tools": {
+    "analyze_auction_asset": {
+      "parameters": {
+        "city": {"nullable": false, "required": true, "type": "string"},
+        "community_keyword": {"nullable": false, "required": true, "type": "string"},
+        "expected_address": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "item_ref": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "limit": {"default": 30, "nullable": false, "required": false, "type": "integer"},
+        "screenshot_area_sqm": {"default": null, "nullable": true, "required": false, "type": "number"},
+        "screenshot_starting_price_yuan": {"default": null, "nullable": true, "required": false, "type": "integer"},
+        "screenshot_title": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
+    "ali_get_filter_options": {
+      "parameters": {}
+    },
+    "ali_get_supported_areas": {
+      "parameters": {
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
+    "ali_pc_browser_close": {
+      "parameters": {}
+    },
+    "ali_pc_browser_start": {
+      "parameters": {}
+    },
+    "ali_pc_browser_status": {
+      "parameters": {}
+    },
+    "ali_pc_get_filter_options": {
+      "parameters": {
+        "category": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
+    "ali_pc_get_item_detail": {
+      "parameters": {
+        "item_id": {"nullable": false, "required": true, "type": "string"}
+      }
+    },
+    "ali_pc_search_judicial": {
+      "parameters": {
+        "asset_type": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "auction_start_from": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "auction_start_to": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "category": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "district": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "keyword": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "limit": {"default": 20, "nullable": false, "required": false, "type": "integer"},
+        "max_price_yuan": {"default": null, "nullable": true, "required": false, "type": "integer"},
+        "min_price_yuan": {"default": null, "nullable": true, "required": false, "type": "integer"},
+        "page": {"default": 1, "nullable": false, "required": false, "type": "integer"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "sort": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "stage": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "status": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
+    "ali_search_judicial": {
+      "parameters": {
+        "circs": {"default": null, "nullable": true, "required": false, "type": "array[string]"},
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "district": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "fcat_v4_ids": {"default": null, "nullable": true, "required": false, "type": "array[string]"},
+        "fcat_v4_names": {"default": null, "nullable": true, "required": false, "type": "array[string]"},
+        "location_codes": {"default": null, "nullable": true, "required": false, "type": "array[string]"},
+        "page": {"default": 1, "nullable": false, "required": false, "type": "integer"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "tag_ids": {"default": null, "nullable": true, "required": false, "type": "array[string]"},
+        "zc_biz_types": {"default": null, "nullable": true, "required": false, "type": "array[string]"}
+      }
+    },
+    "beike_browser_status": {
+      "parameters": {}
+    },
+    "beike_get_xiaoqu_market": {
+      "parameters": {
+        "city": {"nullable": false, "required": true, "type": "string"},
+        "limit": {"default": 30, "nullable": false, "required": false, "type": "integer"},
+        "xiaoqu_id": {"nullable": false, "required": true, "type": "string"}
+      }
+    },
+    "beike_search_xiaoqu": {
+      "parameters": {
+        "city": {"nullable": false, "required": true, "type": "string"},
+        "keyword": {"nullable": false, "required": true, "type": "string"}
+      }
+    },
+    "jd_get_supported_areas": {
+      "parameters": {
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
+    "jd_search_judicial": {
+      "parameters": {
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "district": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "page": {"default": 1, "nullable": false, "required": false, "type": "integer"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    },
+    "search_judicial": {
+      "parameters": {
+        "city": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "district": {"default": null, "nullable": true, "required": false, "type": "string"},
+        "limit": {"default": 20, "nullable": false, "required": false, "type": "integer"},
+        "page": {"default": 1, "nullable": false, "required": false, "type": "integer"},
+        "province": {"default": null, "nullable": true, "required": false, "type": "string"}
+      }
+    }
+  }
+}

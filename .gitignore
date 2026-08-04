@@ -5,6 +5,8 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
+build/
+dist/
 .venv/
 venv/
 
@@ -48,6 +50,14 @@ ali_flows*.mitm
 .idea/
 *.swp
 
+# Local Agent workspaces / state (not part of the product repository)
+.workbuddy/
+_agent_round3_*/
+
 # 测试 / 临时
 /tmp/
 *_test_output.*
+.coverage
+.coverage.*
+coverage.json
+htmlcov/

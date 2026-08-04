@@ -15,9 +15,11 @@
 完全 bypass app 端 unifiedSign + wua + sgext anti-tamper.
 """
 from __future__ import annotations
-import hashlib, json, os, time
+import hashlib, json, time
 from typing import Any
 import httpx
+
+from auction_mcp_assets import load_json
 
 # GB 2260 国标行政区划数据 - 两份, 用途分明:
 #
@@ -29,12 +31,8 @@ import httpx
 #                  34 省 / 344 市 / 3146 区县. **阿里 server 实际接受的就是这个 vintage**.
 #                  例: 柯桥区(2020=330603) 在阿里实际是 绍兴县(330621); 上虞区(2020=330604) 实际是 上虞市(330682).
 #                  2020 码直接传给阿里 → 静默返回全国乱掺垃圾, 故必须用 legacy 解析查询.
-_GB2260_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gb2260.json")
-_GB2260_LEGACY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gb2260_200712.json")
-with open(_GB2260_PATH, "r", encoding="utf-8") as _f:
-    GB2260: list[dict[str, Any]] = json.load(_f)
-with open(_GB2260_LEGACY_PATH, "r", encoding="utf-8") as _f:
-    GB2260_LEGACY: list[dict[str, Any]] = json.load(_f)
+GB2260: list[dict[str, Any]] = load_json("gb2260.json")
+GB2260_LEGACY: list[dict[str, Any]] = load_json("gb2260_200712.json")
 
 
 def _pad_code(code: str) -> str:
@@ -118,6 +116,33 @@ def validate_location_scoped(items: list[dict[str, Any]],
     total = len(items)
     ok = (matched / total) >= min_ratio if total else True
     return {"ok": ok, "matched": matched, "total": total, "sample_off_prefix": off}
+
+def derive_ali_scope_prefix(code: str | None) -> str | None:
+    """从 Ali 地区编码推导守门校验前缀 (纯函数, 无副作用).
+
+    规则:
+      - 2 位 (XX) 或 6 位省级 (XX0000) → 返回 2 位省前缀 "XX"
+      - 4 位 (XXXX) 或 6 位市级 (XXXX00) → 返回 4 位城市前缀 "XXXX"
+      - 6 位区县级 (XXXXXX, 末两位非零) → 返回前 4 位城市范围 "XXXX"
+      - None / 空串 / 非纯数字 / 长度不是 2、4、6 → 返回 None
+      - 超过 6 位的编码禁止静默截断, 返回 None
+    """
+    if not code:
+        return None
+    s = str(code).strip()
+    if not s or not s.isdigit():
+        return None
+    if len(s) == 2:
+        return s
+    if len(s) == 4:
+        return s
+    if len(s) == 6:
+        if s[2:] == "0000":
+            return s[:2]
+        return s[:4]
+    # 长度不是 2/4/6: 禁止静默截断
+    return None
+
 
 H5_GATEWAY   = "https://h5api.m.taobao.com"
 H5_APPKEY    = "12574478"

@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:auction-mcp:evidence-bundle:1.0.0",
+  "title": "auction-mcp deterministic evidence bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "analysis_inputs",
+    "bundle_schema_version",
+    "integrity",
+    "manifest",
+    "provenance",
+    "segments"
+  ],
+  "properties": {
+    "$schema": {"const": "urn:auction-mcp:evidence-bundle:1.0.0"},
+    "bundle_schema_version": {"const": "1.0.0"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["live_collection", "mode", "note"],
+      "properties": {
+        "live_collection": {"type": "boolean"},
+        "mode": {
+          "enum": ["AUTHORIZED_PROVIDER_RESULTS", "ANONYMIZED_HISTORICAL_FIXTURE"]
+        },
+        "note": {"type": "string", "minLength": 1, "maxLength": 240}
+      }
+    },
+    "analysis_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_address",
+        "item_id",
+        "screenshot_area_sqm",
+        "screenshot_starting_price_yuan",
+        "screenshot_title"
+      ],
+      "properties": {
+        "expected_address": {"type": ["string", "null"], "maxLength": 160},
+        "item_id": {"type": "string", "pattern": "^[0-9]{8,20}$"},
+        "screenshot_area_sqm": {"$ref": "#/$defs/nullableDecimal"},
+        "screenshot_starting_price_yuan": {"$ref": "#/$defs/nullableDecimal"},
+        "screenshot_title": {"type": ["string", "null"], "maxLength": 160}
+      }
+    },
+    "segments": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        {"$ref": "#/$defs/aliDetailSegment"},
+        {"$ref": "#/$defs/noticeSegment"},
+        {"$ref": "#/$defs/communitySegment"},
+        {"$ref": "#/$defs/marketSegment"}
+      ],
+      "items": false
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_sha256", "segments"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "segments": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/manifestSegment"}
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "bundle_sha256"],
+      "properties": {
+        "algorithm": {"const": "sha256"},
+        "bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)\\.[0-9]{2}$"},
+    "nullableDecimal": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{6})?Z$"
+    },
+    "segmentBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collected_at",
+        "name",
+        "payload",
+        "provider",
+        "provider_version",
+        "schema_version",
+        "sha256",
+        "source_url"
+      ],
+      "properties": {
+        "collected_at": {"$ref": "#/$defs/timestamp"},
+        "name": {"type": "string"},
+        "payload": {"type": "object"},
+        "provider": {"type": "string"},
+        "provider_version": {"const": "1.0.0"},
+        "schema_version": {"const": "1.0.0"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}
+      }
+    },
+    "aliDetailPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "announcementUrl", "appraisalPriceYuan", "auctionStartAt", "depositYuan",
+        "detailText", "incrementYuan", "itemId", "location", "stage",
+        "startingPriceYuan", "status", "title", "url"
+      ],
+      "properties": {
+        "announcementUrl": {"type": "string", "format": "uri"},
+        "appraisalPriceYuan": {"$ref": "#/$defs/nullableDecimal"},
+        "auctionStartAt": {"type": ["string", "null"]},
+        "depositYuan": {"$ref": "#/$defs/nullableDecimal"},
+        "detailText": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "incrementYuan": {"$ref": "#/$defs/nullableDecimal"},
+        "itemId": {"type": "string", "pattern": "^[0-9]{8,20}$"},
+        "location": {"type": "string", "minLength": 1},
+        "stage": {"type": ["string", "null"]},
+        "startingPriceYuan": {"$ref": "#/$defs/decimal"},
+        "status": {"type": ["string", "null"]},
+        "title": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "format": "uri"}
+      }
+    },
+    "noticePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_is_delivery", "balance_deadline", "buyer_advances_seller_tax",
+        "court_clear_handover", "household_registration_not_handled",
+        "lease_disclosed", "no_defect_warranty", "occupancy_disclosed",
+        "possible_arrears_buyer_risk", "regret_deposit_forfeited",
+        "transfer_not_guaranteed", "viewing_deadline"
+      ],
+      "properties": {
+        "as_is_delivery": {"type": "boolean"},
+        "balance_deadline": {"type": ["string", "null"]},
+        "buyer_advances_seller_tax": {"type": "boolean"},
+        "court_clear_handover": {"type": "boolean"},
+        "household_registration_not_handled": {"type": "boolean"},
+        "lease_disclosed": {"type": "boolean"},
+        "no_defect_warranty": {"type": "boolean"},
+        "occupancy_disclosed": {"type": "boolean"},
+        "possible_arrears_buyer_risk": {"type": "boolean"},
+        "regret_deposit_forfeited": {"type": "boolean"},
+        "transfer_not_guaranteed": {"type": "boolean"},
+        "viewing_deadline": {"type": ["string", "null"]}
+      }
+    },
+    "communityPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "region", "xiaoqu_id"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "region": {"type": "string", "minLength": 1},
+        "xiaoqu_id": {"type": "string", "pattern": "^[0-9]{10,20}$"}
+      }
+    },
+    "listing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["area_sqm", "house_info", "source_url", "title", "total_price_wan", "unit_price_yuan"],
+      "properties": {
+        "area_sqm": {"$ref": "#/$defs/decimal"},
+        "house_info": {"type": "string", "minLength": 1},
+        "source_url": {"type": "string", "format": "uri"},
+        "title": {"type": "string", "minLength": 1},
+        "total_price_wan": {"$ref": "#/$defs/decimal"},
+        "unit_price_yuan": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "marketPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detail", "listings", "status"],
+      "properties": {
+        "status": {"const": "OK"},
+        "detail": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["address", "facts", "listing_average_unit_price_yuan", "name", "source_url", "xiaoqu_id"],
+          "properties": {
+            "address": {"type": "string", "minLength": 1},
+            "facts": {"type": "object", "additionalProperties": {"type": "string"}},
+            "listing_average_unit_price_yuan": {"$ref": "#/$defs/decimal"},
+            "name": {"type": "string", "minLength": 1},
+            "source_url": {"type": "string", "format": "uri"},
+            "xiaoqu_id": {"type": "string", "pattern": "^[0-9]{10,20}$"}
+          }
+        },
+        "listings": {"type": "array", "minItems": 1, "maxItems": 30, "items": {"$ref": "#/$defs/listing"}}
+      }
+    },
+    "aliDetailSegment": {
+      "allOf": [
+        {"$ref": "#/$defs/segmentBase"},
+        {"properties": {"name": {"const": "ali_item_detail"}, "provider": {"const": "ali_pc_browser"}, "payload": {"$ref": "#/$defs/aliDetailPayload"}}}
+      ]
+    },
+    "noticeSegment": {
+      "allOf": [
+        {"$ref": "#/$defs/segmentBase"},
+        {"properties": {"name": {"const": "court_notice_facts"}, "provider": {"const": "public_court_notice"}, "payload": {"$ref": "#/$defs/noticePayload"}}}
+      ]
+    },
+    "communitySegment": {
+      "allOf": [
+        {"$ref": "#/$defs/segmentBase"},
+        {"properties": {"name": {"const": "beike_community"}, "provider": {"const": "beike_browser"}, "payload": {"$ref": "#/$defs/communityPayload"}}}
+      ]
+    },
+    "marketSegment": {
+      "allOf": [
+        {"$ref": "#/$defs/segmentBase"},
+        {"properties": {"name": {"const": "beike_market"}, "provider": {"const": "beike_browser"}, "payload": {"$ref": "#/$defs/marketPayload"}}}
+      ]
+    },
+    "manifestSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collected_at", "name", "provider", "provider_version", "schema_version", "sha256", "source_url"],
+      "properties": {
+        "collected_at": {"$ref": "#/$defs/timestamp"},
+        "name": {"enum": ["ali_item_detail", "court_notice_facts", "beike_community", "beike_market"]},
+        "provider": {"enum": ["ali_pc_browser", "public_court_notice", "beike_browser"]},
+        "provider_version": {"const": "1.0.0"},
+        "schema_version": {"const": "1.0.0"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}
+      }
+    }
+  }
+}

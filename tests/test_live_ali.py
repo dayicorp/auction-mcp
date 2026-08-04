@@ -157,3 +157,52 @@ def test_district_unknown_to_legacy_and_unlearnable_falls_back_to_title_filter()
     # 走 fallback 时附 _district_fallback 标记 (若走到 title filter 分支)
     # 注: learn 兜底先尝试,失败才到 title_filter; 该区名 learn 也学不到, 应到 title_filter.
     assert r.get("_district_fallback") == "title_filter" or r["count"] == 0
+
+
+def test_ali_advanced_filters_accept_current_live_options():
+    """实时读取筛选值并验证轮次/标签/资产类型可被真实 Ali 搜索接受.
+
+    不硬编码 filter value，避免 Ali 调整选项后测试产生无意义漂移；每次从
+    filtersf-nav 选择当前第一个非空值，再分别调用公开 Advanced 工具.
+    """
+    nav = server.ali_get_filter_options()
+    assert "error" not in nav, f"filter nav 应成功, got: {nav}"
+
+    dimensions = {d.get("varName"): d for d in nav.get("dimensions", [])}
+    filters = {
+        "circs": "circs",
+        "tagIds": "tag_ids",
+        "zcBizTypes": "zc_biz_types",
+    }
+
+    for dimension, argument in filters.items():
+        options = [
+            option
+            for option in dimensions.get(dimension, {}).get("options", [])
+            if option.get("value") not in (None, "")
+        ]
+        assert options, f"{dimension} 应至少有一个当前有效选项"
+
+        selected = str(options[0]["value"])
+        result = server.ali_search_judicial(**{argument: [selected]})
+
+        assert "error" not in result, (
+            f"{dimension}={selected} 应被真实 Ali API 接受, got: {result}"
+        )
+        assert result.get("validated") is True
+        assert isinstance(result.get("items"), list)
+
+    category_options = [
+        option
+        for option in dimensions.get("fcatV4Ids", {}).get("options", [])
+        if option.get("name") and option.get("value") not in (None, "")
+    ]
+    assert category_options, "fcatV4Ids 应至少有一个当前有效分类"
+
+    category_name = str(category_options[0]["name"])
+    category_result = server.ali_search_judicial(fcat_v4_names=[category_name])
+    assert "error" not in category_result, (
+        f"分类中文名 {category_name!r} 应被实时解析并由 Ali API 接受, got: {category_result}"
+    )
+    assert category_result.get("validated") is True
+    assert isinstance(category_result.get("items"), list)

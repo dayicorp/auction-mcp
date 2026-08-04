@@ -1,0 +1,98 @@
+{
+  "provenance": {
+    "mode": "ANONYMIZED_HISTORICAL_FIXTURE",
+    "live_collection": false,
+    "note": "P3.8匿名历史测试快照，仅用于确定性离线回放；不是P3.9本轮Live采集。"
+  },
+  "collected_at": {
+    "ali_item_detail": "2026-08-03T13:00:00Z",
+    "court_notice_facts": "2026-08-03T13:00:01Z",
+    "beike_community": "2026-08-03T13:00:02Z",
+    "beike_market": "2026-08-03T13:00:03Z"
+  },
+  "analysis_inputs": {
+    "item_id": "1065987562217",
+    "expected_address": "东华二路2号之二1702室",
+    "screenshot_title": "江门市蓬江区东华二路2号之二1702室",
+    "screenshot_area_sqm": "106.87",
+    "screenshot_starting_price_yuan": "296800.00"
+  },
+  "detail": {
+    "source": "ali_pc_browser",
+    "itemId": "1065987562217",
+    "url": "https://sf-item.taobao.com/sf_item/1065987562217.htm",
+    "title": "二拍 江门市蓬江区东华二路2号之二1702室",
+    "status": "即将开始",
+    "stage": "二拍",
+    "auctionStartAt": "2026-08-04 10:00",
+    "startingPriceYuan": "296800.00",
+    "appraisalPriceYuan": "529940.54",
+    "depositYuan": "30000.00",
+    "incrementYuan": "2000.00",
+    "announcementUrl": "https://sf.taobao.com/notice_detail/17937539.htm?item_id=1065987562217",
+    "location": "广东省 江门市 蓬江区东华二路2号之二1702室",
+    "detailText": "房屋用途 成套住宅 钥 匙 无 权利限制情况 被江门市蓬江区人民法院查封。建筑总面积 建筑面积106.87平方米 房产年龄 1999年建成 房屋楼层 总22层"
+  },
+  "notice": {
+    "source_url": "https://sf.taobao.com/notice_detail/17937539.htm?item_id=1065987562217",
+    "as_is_delivery": true,
+    "no_defect_warranty": true,
+    "court_clear_handover": true,
+    "possible_arrears_buyer_risk": true,
+    "transfer_not_guaranteed": true,
+    "household_registration_not_handled": true,
+    "buyer_advances_seller_tax": true,
+    "regret_deposit_forfeited": true,
+    "occupancy_disclosed": false,
+    "lease_disclosed": false,
+    "viewing_deadline": "2026-07-27 16:00",
+    "balance_deadline": "2026-08-12 16:00"
+  },
+  "community": {
+    "xiaoqu_id": "8895132387978913",
+    "name": "益源大厦",
+    "region": "江华港口 蓬江区",
+    "source_url": "https://jiangmen.ke.com/xiaoqu/c8895132387978913/"
+  },
+  "market": {
+    "status": "OK",
+    "detail": {
+      "xiaoqu_id": "8895132387978913",
+      "name": "益源大厦",
+      "address": "(蓬江区) 东华二路2号",
+      "listing_average_unit_price_yuan": "4862.00",
+      "facts": {
+        "房屋总数": "296户",
+        "建筑年代": "1999-2007年"
+      },
+      "source_url": "https://jiangmen.ke.com/xiaoqu/8895132387978913/"
+    },
+    "listings": [
+      {
+        "title": "高层两房匿名样本A",
+        "area_sqm": "109.00",
+        "house_info": "高楼层 2室1厅 | 109平米 | 1999年",
+        "total_price_wan": "58.00",
+        "unit_price_yuan": "5322.00",
+        "source_url": "https://jiangmen.ke.com/ershoufang/105124490657.html"
+      },
+      {
+        "title": "疑似同套匿名样本B",
+        "area_sqm": "106.87",
+        "house_info": "高楼层 2室2厅 | 106.87平米 | 1999年",
+        "total_price_wan": "55.00",
+        "unit_price_yuan": "5147.00",
+        "source_url": "https://jiangmen.ke.com/ershoufang/105121178010.html"
+      },
+      {
+        "title": "中层三房匿名样本C",
+        "area_sqm": "119.03",
+        "house_info": "中楼层 3室1厅 | 119.03平米 | 2007年",
+        "total_price_wan": "69.80",
+        "unit_price_yuan": "5865.00",
+        "source_url": "https://jiangmen.ke.com/ershoufang/105120965152.html"
+      }
+    ],
+    "listing_source_url": "https://jiangmen.ke.com/ershoufang/c8895132387978913/"
+  }
+}
