@@ -29,6 +29,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 - **PC 完整筛选与详情适配器 (Experimental)** — 可选非持久化 Chrome 会话实现关键词、价格、开始时间、页面动态筛选和单拍品详情读取；登录/验证由用户手动完成
 - **江门贝壳小区 Provider** — 只附加现有本机 CDP 页面，搜索标准小区、读取详情和第一主挂牌列表；推荐区、广告、登录和验证码均严格隔离
 - **一键资产初筛编排** — `analyze_auction_asset` 串联阿里详情、公开法院公告、贝壳小区、疑似同套去重、挂牌估值和fail-closed风险结论
+- **确定性证据回放** — `auction-evidence` 将一次授权Provider结果规范化为无凭据证据包，支持离线验真、报告再生成和字段级diff
 - **pytest 回归与Live隔离** — 精确数量以当前发布门禁输出为准，全部Live默认跳过
 
 ## Quick start
@@ -38,6 +39,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```bash
 python -m pip install .
 auction-mcp
+auction-evidence --help
 ```
 
 注册到 Claude (`~/.claude.json` 或 `claude_desktop_config.json`):
@@ -53,7 +55,7 @@ auction-mcp
 ```
 
 源码开发时仍可使用 `python /path/to/auction-mcp/server.py`；正式消费端验收以
-wheel 安装后的 `auction-mcp` 控制台入口为准，不依赖仓库 cwd 或 `PYTHONPATH`。
+wheel 安装后的 `auction-mcp` 与 `auction-evidence` 控制台入口为准，不依赖仓库 cwd 或 `PYTHONPATH`。
 
 ```bash
 pip install -r requirements.txt    # mcp 1.x, httpx, playwright, pytest, coverage
@@ -72,16 +74,16 @@ GitHub Actions 在 Pull Request、`main` 推送和手动触发时运行九个任
 python scripts/verify_cleanroom.py
 ```
 
-bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，随后调用 `scripts/verify_release.py`。统一门禁完成所有受 Git 跟踪的 Python 文件编译、进程内精确 16 工具注册，并通过官方 MCP 客户端从仓库外 cwd 启动真实 `server.py`，完成 stdio `initialize`、`tools/list`、精确参数 Schema 契约、静态地区读取、无效输入 fail-closed、浏览器未启动状态、异常退出、超时清理和 stderr 安全检查。消费端子进程会加载临时网络阻断器，任何意外 socket 连接都会立即失败。门禁还检查依赖版本、敏感信息与禁止产物、Action不可变SHA，并运行全部离线 pytest。
+bootstrapper 会创建临时 venv、全新安装依赖并运行 `pip check`，随后调用 `scripts/verify_release.py`。统一门禁完成所有受 Git 跟踪的 Python 文件编译、进程内精确 16 工具注册，并通过官方 MCP 客户端从仓库外 cwd 启动真实 `server.py`，完成 stdio `initialize`、`tools/list`、精确参数 Schema 契约、静态地区读取、无效输入 fail-closed、浏览器未启动状态、异常退出、超时清理和 stderr 安全检查。消费端子进程会加载临时网络阻断器，任何意外 socket 连接都会立即失败。门禁还执行证据包跨进程规范化、独立保管摘要校验、字节篡改拒绝及强制断网回放，并检查依赖版本、敏感信息与禁止产物、Action不可变SHA和全部离线 pytest。
 
 随后 `scripts/verify_artifact.py` 从显式源码白名单复制出两个独立构建树，以固定
 `SOURCE_DATE_EPOCH` 各构建一次 wheel 和 sdist；仓库内 PEP 517 后端会进一步
 规范化 sdist 的 gzip/tar 时间、所有者和成员顺序，要求同类制品 SHA-256
 逐字节一致，并以精确成员白名单审计归档内容、元数据、Python 版本、运行依赖、MIT 许可证、
-`auction-mcp = server:main` 入口及四份运行数据/公开契约。任何 tests、scripts、
+`auction-mcp = server:main`、`auction-evidence = evidence_cli:main` 两个入口及五份运行数据/公开契约。任何 tests、scripts、
 Live 文件、缓存、密钥或浏览器状态进入制品都会失败。最终 wheel 被安装到第三个
 全新 venv，重新执行 `pip check`，从仓库外 cwd 通过安装后的控制台入口完成断网
-MCP 握手、16 工具 Schema 与六个安全离线调用，并证明 `server` 和数据资源没有
+MCP 握手、16 工具 Schema 与六个安全离线调用；随后通过安装后的证据CLI完成规范建包、链路摘要验真和断网回放，并证明运行模块和数据资源没有
 从源码 checkout 泄漏。整个流程会清空外部 `PYTEST_ADDOPTS`，不会传入
 `--run-live`、下载或启动浏览器，也不会读取、导出或保存 Cookie。
 
@@ -94,7 +96,7 @@ python scripts/runtime_chaos.py --mode all
 # 冻结于 ec4e050 基线；语句≥75.5%、分支≥66.2%，fail-closed 核心两者均为100%
 python scripts/coverage_gate.py
 
-# 12 个强制安全变异；任何幸存、超时或基础设施退出均失败
+# 20 个强制安全变异；任何幸存、超时或基础设施退出均失败
 python scripts/mutation_gate.py
 ```
 
@@ -177,6 +179,32 @@ analyze_auction_asset(
 疑似同套挂牌后没有独立样本，均会停止。挂牌价明确标记为非成交价；占用、租赁、
 欠费、室内状况等关键事实未知时，结论固定为“暂缓尽调”，`maximum_bid_yuan`
 固定为 `null`。
+
+### P3.9 确定性证据包与离线法证回放
+
+`auction-evidence` 是正式安装入口，不是新的 MCP 工具，因此现有 16 工具契约保持不变。它不会调用Provider、浏览器或网络；一次已授权采集应先把四段Provider结果保存为输入JSON：`detail`、只含结构化风险事实的 `notice`、`community`、`market`，再离线建包。输入还必须包含每段 `collected_at`、分析交叉核验字段及明确的来源模式。益源大厦示例 fixture 明确标记为 `ANONYMIZED_HISTORICAL_FIXTURE`、`live_collection=false`，不是本轮Live采集。
+
+```bash
+# 1. 规范建包；stdout 返回 bundle_sha256，须独立保存为链路保管摘要
+auction-evidence create --input provider-results.json --output evidence.bundle.json
+
+# 2. 验真；只改空白/键顺序也会因非规范字节而失败
+auction-evidence verify --bundle evidence.bundle.json \
+  --expected-sha256 <独立保存的bundle_sha256>
+
+# 3. 强制离线重建同等P3.8分析；报告仍固定 maximum_bid_yuan=null
+auction-evidence replay --bundle evidence.bundle.json \
+  --expected-sha256 <独立保存的bundle_sha256> --output report.json
+
+# 4. 字段级diff；分别校验左右证据包的独立保管摘要
+auction-evidence diff --left before.json --right after.json \
+  --left-expected-sha256 <before_sha256> \
+  --right-expected-sha256 <after_sha256> --output diff.json
+```
+
+证据包使用 JSON Schema 2020-12，固定四段顺序和版本；`create`/`verify` 会实际执行随 wheel 打包的 Schema，而非只依赖文档。金额、面积均编码为两位 Decimal 字符串，时间统一为 UTC `Z`，列表按稳定来源URL排序。每段、manifest和整包分别计算SHA-256；CLI回放额外要求独立保管的整包摘要，防止攻击者改语义后重算包内哈希。diff分别报告价格、样本增删、法律事实、来源、schema和其他字段变化；若左右 schema/provider 版本不同，则返回分类为 `schema_changes` 的 `EVIDENCE_SCHEMA_CHANGE` 并停止，不跨版本宽松解释字段。
+
+以下情况全部fail-closed：缺段、重复段/样本、未知版本、采集时间倒退、URL越界、跨段ID/公告冲突、任一哈希不一致、非规范字节、NaN/Infinity、超过1 MiB或过深输入。字段白名单和结构化扫描禁止凭据头、手机号、身份证、银行卡、原始公告正文及浏览器存储进入证据包。失败诊断只返回类别和字段路径，不回显命中的敏感值。更完整的错误码和处置见 [`docs/reliability.md`](docs/reliability.md)。
 
 ### 阿里 PC 完整筛选
 
@@ -305,16 +333,20 @@ search_judicial(province="四川", city="成都市", district="武侯区")
 auction-mcp/
 ├── server.py            # FastMCP server, 16 个 @mcp.tool()
 ├── asset_analysis.py    # 公告读取、精确匹配、去重估值与fail-closed报告
+├── evidence_bundle.py   # 证据包规范化、三层哈希、离线回放与字段级diff
+├── evidence_safety.py   # 100%语句/分支覆盖的证据安全关键核心
+├── evidence_cli.py      # auction-evidence正式CLI入口
 ├── ali_h5_client.py     # 阿里 H5 mtop client + 双 vintage 解析 + 守门 + 动态学码
 ├── ali_pc_browser_client.py # 非持久化 Chrome PC 完整筛选适配器
 ├── beike_browser_client.py # 附加现有CDP页面的江门贝壳小区Provider
 ├── jd_h5_client.py      # 京东 m. 版 client + 全国地区树查询
-├── auction_mcp_assets/  # wheel内只读运行数据与16工具公开契约
+├── auction_mcp_assets/  # wheel内只读运行数据、证据JSON Schema与16工具公开契约
 │   ├── gb2260.json      # GB 2260 2020 版 (展示用, 不用于查询)
 │   ├── gb2260_200712.json # GB 2260 pre-2013 (阿里查询 vintage)
 │   ├── jd_areas.json    # 京东 33 省/455 市/5344 区县地区树
+│   ├── evidence_bundle_schema.json # versioned证据包JSON Schema 2020-12
 │   └── mcp_contract.json # 16 工具公开参数 Schema 契约
-├── pyproject.toml       # wheel/sdist元数据与auction-mcp控制台入口
+├── pyproject.toml       # wheel/sdist元数据与两个正式控制台入口
 ├── .github/workflows/ci.yml # Windows/Linux × Python 3.10/3.12/3.14 离线 CI
 ├── scripts/consumer_probe.py # 仓库外 cwd 的真实 MCP 消费端与故障生命周期探针
 ├── scripts/verify_cleanroom.py # 全新 venv 安装、pip check 与统一门禁入口
@@ -328,9 +360,9 @@ auction-mcp/
 ├── coverage_contract.json # 覆盖率基线、阈值与关键文件契约
 ├── scripts/runtime_chaos.py # 原始stdio混沌与527生命周期跨平台压力门禁
 ├── scripts/coverage_gate.py # 离线语句/分支覆盖率门禁
-├── scripts/mutation_gate.py # 12个安全关键确定性变异门禁
+├── scripts/mutation_gate.py # 20个安全关键确定性变异门禁
 ├── docs/reliability.md  # 机器诊断字段与故障定位
-└── tests/               # 260 项离线 pytest + 21 项 Live 默认跳过
+└── tests/               # 离线 pytest 与 21 项 Live 默认跳过；精确数量见当前门禁
 ```
 
 ### 为什么默认链路是纯 httpx
@@ -349,6 +381,7 @@ PC 页面独有的关键词、价格与开始时间参数会被 H5 mtop 静默�
 
 ## Roadmap
 
+- [x] **P3.9 确定性证据包、篡改检测与离线法证回放** — 四段版本化JSON Schema、Decimal/UTC/稳定排序规范、段/manifest/整包SHA-256与独立保管摘要、严格敏感信息红线、零Provider断网回放、跨进程/跨cwd固定哈希、字段级diff、匿名历史fixture及安装型`auction-evidence` CLI；现有16工具MCP契约不变
 - [x] **P3.8 一键资产分析编排** — 从阿里ID/固定链接或唯一地址反查开始，串联登录态详情、固定域名公开法院公告和江门贝壳市场；对结构化截图交叉核验、精确小区匹配、疑似同套挂牌去重和挂牌估值；占用、租赁、钥匙、欠费或过户事实不足时fail-closed为暂缓，永不生成未经支持的最高出价，也不执行任何交易动作
 - [x] **P3.7 江门贝壳 Provider 正式集成** — 复用现有本机 CDP 页面完成标准小区候选、详情和第一主挂牌列表；历史江海花园16套/中位6306、奥园外滩30套/中位8515及五福村NO_MATCH固化为回归；原12工具Schema不变，总工具数15；登录、验证码、推荐区和浏览器存储均fail-closed
 - [x] **P3.6 可发布制品与真实消费端安装闭环** — 两个独立源码树各构建 wheel/sdist 并要求固定 epoch 下同类 SHA-256 逐字节一致；审计制品只包含运行模块、四份只读数据/契约、入口和许可证；第三个全新 venv 从 wheel 安装依赖并 `pip check`，再从仓库外 cwd 通过 `auction-mcp` 入口完成断网 initialize、精确12工具 Schema、五个安全调用、失败生命周期与源码泄漏检查；六个 Windows/Linux × Python 3.10/3.12/3.14 clean-room 任务全部复现

@@ -758,14 +758,21 @@ def _resource_count() -> int | None:
     return None
 
 
+def _mcp_io_thread_names() -> list[str]:
+    """Return only live MCP stdout/stderr reader thread names."""
+    return sorted(
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith(("mcp-stdout-", "mcp-stderr-"))
+    )
+
+
 def _resource_snapshot(guard: GuardEnvironment, stage: str) -> dict[str, Any]:
     threads = threading.enumerate()
     thread_names = sorted(thread.name for thread in threads)
     return {
         "active_mcp_processes": guard.active_process_count(),
-        "mcp_io_threads": sum(
-            name.startswith(("mcp-stdout-", "mcp-stderr-")) for name in thread_names
-        ),
+        "mcp_io_threads": len(_mcp_io_thread_names()),
         "open_windows_job_handles": (
             _WindowsJob.open_handle_count() if os.name == "nt" else 0
         ),

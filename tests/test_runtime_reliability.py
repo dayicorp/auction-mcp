@@ -101,6 +101,24 @@ def test_process_containment_does_not_use_parent_pid_snapshots():
     assert "QueryInformationJobObject" in source
 
 
+def test_timeout_diagnostic_thread_filter_is_defined_and_mcp_scoped(monkeypatch):
+    class Thread:
+        def __init__(self, name):
+            self.name = name
+
+    monkeypatch.setattr(
+        gate.threading,
+        "enumerate",
+        lambda: [
+            Thread("MainThread"),
+            Thread("mcp-stderr-22"),
+            Thread("worker"),
+            Thread("mcp-stdout-11"),
+        ],
+    )
+    assert gate._mcp_io_thread_names() == ["mcp-stderr-22", "mcp-stdout-11"]
+
+
 def test_platform_process_containment_is_operational():
     if gate.os.name != "nt":
         # Stay inside pid_t so Linux reaches the intended ESRCH path.

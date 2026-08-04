@@ -17,11 +17,17 @@
     "server",
     "ali_h5_client",
     "asset_analysis",
+    "evidence_bundle",
+    "evidence_safety",
     "jd_h5_client",
     "safety_core"
   ],
   "critical_files": {
     "safety_core.py": {
+      "minimum_branch_coverage_percent": 100.0,
+      "minimum_statement_coverage_percent": 100.0
+    },
+    "evidence_safety.py": {
       "minimum_branch_coverage_percent": 100.0,
       "minimum_statement_coverage_percent": 100.0
     }

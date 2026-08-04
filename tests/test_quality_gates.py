@@ -40,6 +40,9 @@ def test_coverage_contract_freezes_real_baseline_and_critical_100_percent():
     critical = contract["critical_files"]["safety_core.py"]
     assert critical["minimum_branch_coverage_percent"] == 100.0
     assert critical["minimum_statement_coverage_percent"] == 100.0
+    evidence_critical = contract["critical_files"]["evidence_safety.py"]
+    assert evidence_critical["minimum_branch_coverage_percent"] == 100.0
+    assert evidence_critical["minimum_statement_coverage_percent"] == 100.0
 
 
 def test_mutation_manifest_covers_every_required_operator_without_ambiguity():
@@ -73,6 +76,16 @@ def test_coverage_diagnostic_keeps_global_and_critical_percentages_separate():
             "percent_covered": 79.167,
         },
         "files": {
+            "evidence_safety.py": {
+                "summary": {
+                    "num_statements": 20,
+                    "covered_lines": 20,
+                    "num_branches": 8,
+                    "covered_branches": 8,
+                    "missing_lines": 0,
+                    "missing_branches": 0,
+                }
+            },
             "safety_core.py": {
                 "summary": {
                     "num_statements": 10,
@@ -89,6 +102,10 @@ def test_coverage_diagnostic_keeps_global_and_critical_percentages_separate():
     assert diagnostic["statement_percent"] == 80.0
     assert diagnostic["branch_percent"] == 75.0
     assert diagnostic["critical"]["safety_core.py"] == {
+        "statement_percent": 100.0,
+        "branch_percent": 100.0,
+    }
+    assert diagnostic["critical"]["evidence_safety.py"] == {
         "statement_percent": 100.0,
         "branch_percent": 100.0,
     }

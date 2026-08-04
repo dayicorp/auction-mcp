@@ -1,4 +1,4 @@
-# P3.4-P3.8 运行时、资源、发布制品与资产编排可靠性诊断
+# P3.4-P3.9 运行时、资源、发布制品、资产编排与证据回放诊断
 
 三项门禁均为离线、跨工作目录、无浏览器流程。它们不会传入
 `--run-live`，不会读取 Cookie、Token 或浏览器状态，也不会访问外部网络。
@@ -58,7 +58,7 @@ python scripts/coverage_gate.py
 
 `coverage_contract.json` 记录了基线提交、实测语句75.597%、分支66.25%和
 综合72.881%，并冻结最低75.5%/66.2%/72.8%。`COVERAGE_DIAGNOSTIC` 同时报告当前全局三项覆盖率以及
-`safety_core.py` 的语句/分支覆盖率。关键文件任一缺失行、缺失分支或低于
+`safety_core.py` 与 `evidence_safety.py` 的语句/分支覆盖率。关键文件任一缺失行、缺失分支或低于
 100% 都会失败；Live、登录和真实 Cookie 路径不在离线覆盖目标中，也不会
 用排除标记伪装为已覆盖。
 
@@ -70,7 +70,7 @@ python scripts/mutation_gate.py
 
 门禁把每个变异应用到独立临时仓库并执行真实 pytest。类别包括条件反转、
 边界删除、错误码替换、默认值改变、守门绕过和 Schema 漂移。
-`MUTATION_DIAGNOSTIC` 的 `killed` 必须等于 `total`（当前为 12），
+`MUTATION_DIAGNOSTIC` 的 `killed` 必须等于 `total`（当前为 20），
 `survived` 必须为 0。源片段不唯一、测试超时或 pytest 基础设施退出都属于
 门禁失败，不能当作“已杀死”。
 
@@ -78,7 +78,7 @@ python scripts/mutation_gate.py
 
 - 六个 `release-gate`：Windows/Linux × Python 3.10/3.12/3.14 clean-room。
 - 两个 `runtime-stress`：Windows/Linux × Python 3.12，执行完整 527 生命周期与四阶段资源诊断。
-- 一个 `mutation-coverage`：Linux × Python 3.12，先覆盖率后 12 个变异。
+- 一个 `mutation-coverage`：Linux × Python 3.12，先覆盖率后 20 个变异。
 
 所有九个任务必须 success；压力或变异任务仅触发不代表完成。
 六个 clean-room 任务还会分别输出 `RELEASE_DIAGNOSTIC` 与
@@ -96,14 +96,16 @@ python scripts/verify_artifact.py
 源码白名单创建两个互不复用的构建树。仓库内 PEP 517 后端固定 sdist 的
 gzip/tar 时间、uid/gid、用户名、权限和成员顺序；wheel 与 sdist 的文件名和
 SHA-256 必须分别一致。归档不得包含 tests、scripts、Live、缓存、浏览器状态或密钥类文件。
-wheel 必须包含七个运行模块、四份 JSON 资源、MIT 许可证、Python >=3.10
-元数据、三项运行依赖以及唯一 `auction-mcp = server:main` 入口。
+wheel 必须包含十个运行模块、五份 JSON 资源、MIT 许可证、Python >=3.10
+元数据、三项运行依赖以及 `auction-mcp = server:main`、
+`auction-evidence = evidence_cli:main` 两个入口。
 
 构建审计后，门禁创建第三个 venv，直接安装 wheel 及其声明依赖并运行
 `pip check`。安装后的 `server` 与 `auction_mcp_assets` 必须来自该 venv，不能
 回退到源码仓库；随后从外部 cwd 调用控制台入口，在 socket 强制断网下完成真实
 MCP initialize、tools/list、16工具 Schema、六个安全调用、stderr 和异常/超时
-回收检查。
+回收检查；随后使用安装后的证据CLI从同一外部cwd完成规范建包、独立摘要验真和
+离线报告再生成。
 
 ## P3.8 资产编排诊断
 
@@ -126,6 +128,39 @@ MCP initialize、tools/list、16工具 Schema、六个安全调用、stderr 和�
 公告解析只返回有界风险事实，不返回整页正文、电话或银行账号；挂牌统计明确是
 要约价格而非成交价格。遇到登录或验证码时保留现有浏览器状态并停止，不得自动
 登录、读取浏览器存储、报名、缴纳保证金或出价。
+
+## P3.9 证据包诊断与安全处置
+
+`scripts/verify_release.py` 的 `deterministic_evidence` 阶段必须报告固定
+`bundle_sha256`、两次跨进程生成、`network_calls: 0` 和至少一个被拒绝的字节
+篡改案例。六个 clean-room job 分别在 Windows/Linux 与 Python 3.10/3.12/3.14
+执行同一 fixture 和固定摘要断言，因此任一平台或版本生成不同字节都会失败。
+`scripts/verify_artifact.py` 还会从 wheel 安装后的外部 cwd 调用
+`auction-evidence create/verify/replay`，避免只验证源码入口。
+
+正式CLI的链路保管契约：
+
+1. `create` 输出规范JSON文件，并在stdout返回 `bundle_sha256`；该摘要必须与证据包
+   分开保存。
+2. `verify`、`replay` 和 `diff` 必须传入相应的 `--expected-sha256`；只依赖包内
+   自哈希不能识别攻击者改语义后重算全部哈希。
+3. 输入字节必须等于规范JSON字节；空白、键顺序或结尾换行变化返回
+   `EVIDENCE_NONCANONICAL_BYTES`。
+4. replay只把四段已验真payload交给纯分析函数，不导入 `server`、浏览器Provider或
+   网络客户端；`maximum_bid_yuan`一旦非null返回 `EVIDENCE_UNSAFE_ANALYSIS`。
+
+主要失败码与处置：
+
+- `EVIDENCE_REQUIRED_SEGMENT_MISSING` / `EVIDENCE_DUPLICATE_SEGMENT`：证据不完整或重复；回到原采集记录，不得猜补；
+- `EVIDENCE_UNKNOWN_VERSION`：bundle、provider、segment schema或哈希算法未知；使用匹配版本读取器，不得宽松解析；
+- `EVIDENCE_SCHEMA_CHANGE`：diff发现左右bundle、provider或segment schema版本不同；诊断归类为`schema_changes`，但拒绝跨版本解释payload；
+- `EVIDENCE_JSON_SCHEMA_INVALID`：证据包未通过随发行物打包并实际执行的Draft 2020-12 Schema；先按路径诊断生产端契约漂移；
+- `EVIDENCE_TIME_ROLLBACK`：采集时间倒退；核验UTC时钟和采集顺序；
+- `EVIDENCE_URL_OUT_OF_SCOPE` / `EVIDENCE_CONFLICT`：来源越界或跨段ID/URL冲突；隔离证据包；
+- `EVIDENCE_SEGMENT_HASH_MISMATCH` / `EVIDENCE_MANIFEST_HASH_MISMATCH` / `EVIDENCE_BUNDLE_HASH_MISMATCH`：包内篡改；停止回放并保留原始字节；
+- `EVIDENCE_CUSTODY_HASH_MISMATCH`：与独立保管摘要不一致，包含“全量重算内部哈希”攻击场景；
+- `EVIDENCE_SENSITIVE_DATA`：命中禁止字段、凭据头、手机号、身份证、银行卡、原始公告正文或浏览器存储；删除整个候选包并从白名单结构重新导出，不得在日志中回显命中值；
+- `EVIDENCE_NONFINITE_NUMBER` / `EVIDENCE_FLOAT_FORBIDDEN` / `EVIDENCE_INPUT_TOO_LARGE`：非规范数字或资源边界；禁止提高上限绕过。
 
 常见错误：
 

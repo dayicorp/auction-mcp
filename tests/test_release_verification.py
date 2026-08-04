@@ -84,6 +84,7 @@ def test_release_gate_dependency_contract_matches_repository():
         "mcp>=1.0,<2",
         "httpx>=0.27",
         "playwright>=1.50,<2",
+        "jsonschema>=4.20,<5",
         "pytest>=8.0",
         "coverage>=7.10,<8",
     }
@@ -131,6 +132,18 @@ def test_release_gate_pytest_command_is_offline_only():
     assert command[-1] == "tests"
     assert "--run-live" not in command
     assert command[1:4] == ["-m", "pytest", "-q"]
+
+
+def test_release_gate_enforces_deterministic_evidence_replay():
+    result = release_gate.verify_deterministic_evidence(timeout_seconds=30.0)
+    assert result == {
+        "bundle_sha256": release_gate.EXPECTED_EVIDENCE_BUNDLE_SHA256,
+        "report_sha256": release_gate.EXPECTED_EVIDENCE_REPORT_SHA256,
+        "cross_process_runs": 2,
+        "json_schema_validated": True,
+        "network_calls": 0,
+        "tamper_cases_rejected": 1,
+    }
 
 
 def test_release_and_cleanroom_gates_emit_machine_readable_diagnostics():

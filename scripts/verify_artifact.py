@@ -41,9 +41,13 @@ SOURCE_FILES = (
     "ali_pc_browser_client.py",
     "asset_analysis.py",
     "beike_browser_client.py",
+    "evidence_bundle.py",
+    "evidence_cli.py",
+    "evidence_safety.py",
     "auction_mcp_assets/__init__.py",
     "auction_mcp_assets/gb2260.json",
     "auction_mcp_assets/gb2260_200712.json",
+    "auction_mcp_assets/evidence_bundle_schema.json",
     "auction_mcp_assets/jd_areas.json",
     "auction_mcp_assets/mcp_contract.json",
     "build_backend.py",
@@ -59,6 +63,9 @@ RUNTIME_MODULES = {
     "ali_pc_browser_client.py",
     "asset_analysis.py",
     "beike_browser_client.py",
+    "evidence_bundle.py",
+    "evidence_cli.py",
+    "evidence_safety.py",
     "jd_h5_client.py",
     "safety_core.py",
     "server.py",
@@ -67,11 +74,13 @@ RUNTIME_ASSETS = {
     "auction_mcp_assets/__init__.py",
     "auction_mcp_assets/gb2260.json",
     "auction_mcp_assets/gb2260_200712.json",
+    "auction_mcp_assets/evidence_bundle_schema.json",
     "auction_mcp_assets/jd_areas.json",
     "auction_mcp_assets/mcp_contract.json",
 }
 EXPECTED_RUNTIME_REQUIREMENTS = {
     ("httpx", ">=0.27"),
+    ("jsonschema", "<5,>=4.20"),
     ("mcp", "<2,>=1.0"),
     ("playwright", "<2,>=1.50"),
 }
@@ -263,7 +272,12 @@ def inspect_wheel(path: Path) -> dict[str, object]:
         raise ArtifactVerificationError(
             f"wheel runtime requirements drifted: {sorted(requirements)!r}"
         )
-    if entrypoints.strip() != "[console_scripts]\nauction-mcp = server:main":
+    expected_entrypoints = (
+        "[console_scripts]\n"
+        "auction-evidence = evidence_cli:main\n"
+        "auction-mcp = server:main"
+    )
+    if entrypoints.strip() != expected_entrypoints:
         raise ArtifactVerificationError("wheel console entrypoint drifted")
     return {
         "members": len(names),
@@ -355,9 +369,11 @@ def verify_installed_consumer(
         label="artifact-consumer pip check",
     )
     origin_check = (
-        "from pathlib import Path; import server, auction_mcp_assets; "
+        "from pathlib import Path; import server, evidence_bundle, evidence_cli, "
+        "evidence_safety, auction_mcp_assets; "
         f"root=Path({str(ROOT)!r}).resolve(); "
-        "paths=[Path(server.__file__).resolve(), "
+        "paths=[Path(server.__file__).resolve(), Path(evidence_bundle.__file__).resolve(), "
+        "Path(evidence_cli.__file__).resolve(), Path(evidence_safety.__file__).resolve(), "
         "Path(auction_mcp_assets.__file__).resolve()]; "
         "assert all(p != root and root not in p.parents for p in paths), paths"
     )
@@ -387,6 +403,70 @@ def verify_installed_consumer(
     if '"distribution": "installed-wheel"' not in result.stdout:
         raise ArtifactVerificationError("installed consumer provenance is missing")
     print(result.stdout.rstrip())
+
+    evidence_entrypoint_name = (
+        "auction-evidence.exe" if os.name == "nt" else "auction-evidence"
+    )
+    evidence_entrypoint = bin_dir / evidence_entrypoint_name
+    if not evidence_entrypoint.is_file():
+        raise ArtifactVerificationError("installed auction-evidence entrypoint is unavailable")
+    fixture = ROOT / "tests" / "fixtures" / "yiyuan_evidence_provider_results.json"
+    bundle_path = consumer_cwd / "evidence-bundle.json"
+    report_path = consumer_cwd / "evidence-report.json"
+    expected_hash = "728294aaf4a86a62a81d7f64712bcb0a9a4dbeba80c87608b0b6db3cc622a169"
+    create_result = run_checked(
+        [
+            str(evidence_entrypoint),
+            "create",
+            "--input",
+            str(fixture),
+            "--output",
+            str(bundle_path),
+        ],
+        cwd=consumer_cwd,
+        env=env,
+        timeout_seconds=30,
+        label="installed evidence CLI canonical creation",
+        capture=True,
+    )
+    if expected_hash not in create_result.stdout:
+        raise ArtifactVerificationError("installed evidence CLI hash drifted")
+    run_checked(
+        [
+            str(evidence_entrypoint),
+            "verify",
+            "--bundle",
+            str(bundle_path),
+            "--expected-sha256",
+            expected_hash,
+        ],
+        cwd=consumer_cwd,
+        env=env,
+        timeout_seconds=30,
+        label="installed evidence CLI custody verification",
+    )
+    run_checked(
+        [
+            str(evidence_entrypoint),
+            "replay",
+            "--bundle",
+            str(bundle_path),
+            "--expected-sha256",
+            expected_hash,
+            "--output",
+            str(report_path),
+        ],
+        cwd=consumer_cwd,
+        env=env,
+        timeout_seconds=30,
+        label="installed evidence CLI offline replay",
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "OK" or report.get("maximum_bid_yuan") is not None:
+        raise ArtifactVerificationError("installed evidence replay violated safety contract")
+    expected_report_hash = "f762580b5266a8bca969f4dccac1a803a0f08bb4ae8e25b2087ae2d5819489b3"
+    if sha256_file(report_path) != expected_report_hash:
+        raise ArtifactVerificationError("installed evidence report hash drifted")
 
 
 def main() -> int:

@@ -6,6 +6,7 @@ environment.  It never enables ``--run-live`` and never starts a browser.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -24,6 +25,7 @@ EXPECTED_REQUIREMENTS = {
     "mcp>=1.0,<2",
     "httpx>=0.27",
     "playwright>=1.50,<2",
+    "jsonschema>=4.20,<5",
     "pytest>=8.0",
     "coverage>=7.10,<8",
 }
@@ -54,6 +56,12 @@ EXPECTED_MCP_TOOLS = {
 }
 
 MCP_STDIO_STARTUP_TIMEOUT_SECONDS = 30.0
+EXPECTED_EVIDENCE_BUNDLE_SHA256 = (
+    "728294aaf4a86a62a81d7f64712bcb0a9a4dbeba80c87608b0b6db3cc622a169"
+)
+EXPECTED_EVIDENCE_REPORT_SHA256 = (
+    "f762580b5266a8bca969f4dccac1a803a0f08bb4ae8e25b2087ae2d5819489b3"
+)
 
 FORBIDDEN_PATH_PARTS = {
     ".pytest_cache",
@@ -211,6 +219,7 @@ def verify_dependency_contract() -> dict[str, str]:
         for name in (
             "mcp",
             "httpx",
+            "jsonschema",
             "playwright",
             "pytest",
             "coverage",
@@ -223,6 +232,10 @@ def verify_dependency_contract() -> dict[str, str]:
         raise VerificationError(f"MCP must remain on 1.x, got {versions['mcp']}")
     if _version_tuple(versions["httpx"]) < (0, 27):
         raise VerificationError(f"httpx must be >=0.27, got {versions['httpx']}")
+    if not ((4, 20) <= _version_tuple(versions["jsonschema"]) < (5,)):
+        raise VerificationError(
+            "jsonschema must be >=4.20,<5, got " + versions["jsonschema"]
+        )
     if not ((1, 50) <= _version_tuple(versions["playwright"]) < (2,)):
         raise VerificationError(
             f"playwright must be >=1.50,<2, got {versions['playwright']}"
@@ -294,6 +307,10 @@ def verify_forbidden_tracked_paths(paths: Iterable[PurePosixPath]) -> None:
 
 def scan_sensitive_text(paths: Iterable[PurePosixPath]) -> None:
     findings: list[str] = []
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from evidence_safety import EvidenceBundleError, scan_sensitive_data
+
     for relative in paths:
         absolute = ROOT / Path(*relative.parts)
         data = absolute.read_bytes()
@@ -304,6 +321,14 @@ def scan_sensitive_text(paths: Iterable[PurePosixPath]) -> None:
             for match in pattern.finditer(text):
                 line = text.count("\n", 0, match.start()) + 1
                 findings.append(f"{relative}:{line}:{pattern_name}")
+        if relative.suffix.lower() == ".json":
+            try:
+                scan_sensitive_data(json.loads(text))
+            except json.JSONDecodeError:
+                findings.append(f"{relative}:invalid_json")
+            except EvidenceBundleError as exc:
+                kind = exc.diagnostics.get("kind", exc.code)
+                findings.append(f"{relative}:structured:{kind}")
     if findings:
         raise VerificationError(f"sensitive text detected: {findings!r}")
 
@@ -451,6 +476,127 @@ def verify_consumer_probe(timeout_seconds: float = 45.0) -> None:
         )
 
 
+def verify_deterministic_evidence(timeout_seconds: float = 45.0) -> dict[str, object]:
+    """Exercise canonical creation, custody verification, and network-free replay."""
+    fixture = ROOT / "tests" / "fixtures" / "yiyuan_evidence_provider_results.json"
+    if not fixture.is_file():
+        raise VerificationError("deterministic evidence fixture is missing")
+    with tempfile.TemporaryDirectory(prefix="auction-evidence-release-") as temp:
+        temp_root = Path(temp)
+        outputs: list[bytes] = []
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        for index, seed in enumerate(("11", "97")):
+            cwd = temp_root / f"cwd-{index}"
+            cwd.mkdir()
+            output = temp_root / f"bundle-{index}.json"
+            process_env = env.copy()
+            process_env["PYTHONHASHSEED"] = seed
+            process_env["PYTHONPATH"] = str(ROOT)
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "evidence_cli",
+                        "create",
+                        "--input",
+                        str(fixture),
+                        "--output",
+                        str(output),
+                    ],
+                    cwd=cwd,
+                    env=process_env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise VerificationError("evidence creation timed out") from exc
+            if completed.returncode != 0:
+                raise VerificationError(
+                    f"evidence creation failed ({completed.returncode})"
+                )
+            if EXPECTED_EVIDENCE_BUNDLE_SHA256 not in completed.stdout:
+                raise VerificationError("canonical evidence bundle hash drifted")
+            outputs.append(output.read_bytes())
+        if outputs[0] != outputs[1]:
+            raise VerificationError("evidence bundle is not cross-process deterministic")
+
+        bundle_path = temp_root / "bundle.json"
+        bundle_path.write_bytes(outputs[0])
+        guard = temp_root / "network-guard"
+        guard.mkdir()
+        (guard / "sitecustomize.py").write_text(
+            "import socket\n"
+            "def _blocked(*args, **kwargs):\n"
+            "    raise RuntimeError('network forbidden during evidence replay')\n"
+            "socket.socket.connect = _blocked\n"
+            "socket.socket.connect_ex = _blocked\n"
+            "socket.create_connection = _blocked\n",
+            encoding="utf-8",
+        )
+        report_path = temp_root / "report.json"
+        replay_env = env.copy()
+        replay_env["PYTHONPATH"] = os.pathsep.join([str(guard), str(ROOT)])
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "evidence_cli",
+                "replay",
+                "--bundle",
+                str(bundle_path),
+                "--expected-sha256",
+                EXPECTED_EVIDENCE_BUNDLE_SHA256,
+                "--output",
+                str(report_path),
+            ],
+            cwd=temp_root / "cwd-0",
+            env=replay_env,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+        if completed.returncode != 0:
+            raise VerificationError("network-blocked evidence replay failed")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if report.get("status") != "OK" or report.get("maximum_bid_yuan") is not None:
+            raise VerificationError("evidence replay safety result drifted")
+        report_hash = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        if report_hash != EXPECTED_EVIDENCE_REPORT_SHA256:
+            raise VerificationError("canonical evidence report hash drifted")
+
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from evidence_bundle import load_evidence_bundle
+        from evidence_safety import EvidenceBundleError
+
+        tampered_path = temp_root / "tampered.json"
+        tampered_path.write_bytes(outputs[0] + b"\n")
+        try:
+            load_evidence_bundle(tampered_path)
+        except EvidenceBundleError as exc:
+            if exc.code != "EVIDENCE_NONCANONICAL_BYTES":
+                raise VerificationError("byte tamper returned wrong diagnostic") from exc
+        else:
+            raise VerificationError("byte tamper survived evidence gate")
+    return {
+        "bundle_sha256": EXPECTED_EVIDENCE_BUNDLE_SHA256,
+        "report_sha256": EXPECTED_EVIDENCE_REPORT_SHA256,
+        "cross_process_runs": 2,
+        "json_schema_validated": True,
+        "network_calls": 0,
+        "tamper_cases_rejected": 1,
+    }
+
+
 def offline_pytest_command() -> list[str]:
     return [
         sys.executable,
@@ -524,6 +670,13 @@ def main() -> int:
         verify_consumer_probe()
         diagnostic["consumer_probe"] = "pass"
         print("[PASS] clean-room MCP consumer contract and lifecycle")
+
+        diagnostic["stage"] = "deterministic_evidence"
+        evidence = verify_deterministic_evidence()
+        diagnostic["deterministic_evidence"] = evidence
+        print(
+            "[PASS] deterministic evidence bundle, custody, tamper, and offline replay"
+        )
 
         diagnostic["stage"] = "offline_pytest"
         run_offline_tests()
