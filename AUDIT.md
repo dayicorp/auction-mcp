@@ -217,3 +217,52 @@ badge 写 "tests 47 passing", 实际默认只跑 28 个; 另外 19 个标了 `@p
 4. 单源工具补 try/except; token 自愈加锁
 5. limit/page 校验; 学码负缓存; `validated` 与 `ret` 解析清理
 6. 补测试: 省级前缀回归、荆州/井陉类同名邻区回归、全量数据集往返 (这三类都可零网络覆盖)
+
+---
+
+# 附录: 冒烟测试与优化建议 (2026-09-17)
+
+线上仍被组织出口策略封禁 (`connect_rejected` 403 → `h5api.m.taobao.com` / `api.m.jd.com`), 故冒烟分两层, 均零网络:
+
+- **L1 协议层** — 以真实 MCP client 起 `server.py` 子进程, 走完整 stdio `initialize` / `tools/list` / `tools/call`
+- **L2 管线层** — `httpx.MockTransport` 扮演**完全配合**的上游 (如实按请求编码返回该地区正确数据), 跑 解析→组包→解析响应→归一→合并→信封
+
+已固化为 `tests/test_smoke.py`。全量: **34 passed / 19 skipped(live) / 3 xfailed**。
+
+## 冒烟结果
+
+**通过**: 6 工具全部注册且 schema 正常; 零网络工具 (`*_get_supported_areas`) 端到端可调; 阿里出站 sign 为 32 位 MD5、`sort=501`、`statusOrders=["0","1"]` 正确; 京东出站中文名已解析成真实 id (广东=19 / 广州=1601); 双端聚合、分→元归一、价格降序、单端故障降级全部正确。
+
+**两个 P0 在"上游完全配合"的前提下复现** —— 证明缺陷 100% 在客户端:
+
+| 场景 | 上游返回 | 客户端结果 |
+|---|---|---|
+| `province="广东"` | 6 条**合法广东**标的 | `error: ali_returned_unscoped_results`, 全量丢弃 |
+| `city="荆州市"` | 按发来的 `['420800']` 如实返回荆门标的 | `validated: true`, 3 条**荆门**数据零告警 |
+
+协议层还坐实了 P1-5: `ali_search_judicial` / `jd_search_judicial` 在 MCP 层直接 `isError=True` 吐 Python 异常串, 而 `search_judicial` 正常降级。
+
+## 实测开销 (模拟单次上游往返 120ms)
+
+```
+冷启动首次 ali_search(省市级)          2 次上游   245ms  串行
+热态      ali_search(省市级)          1 次上游   121ms
+search_judicial 双端(省市级)           2 次上游   123ms  并行 ✓
+ali_search(district 学码失败)          6 次上游   728ms  串行 ✗
+  同一 district 再查                   6 次上游   728ms  ← 无负缓存, 每次重复付
+search_judicial(district 学码失败)     7 次上游   729ms  ← 并行优势被完全吃掉
+```
+
+**先说不用优化的**: 三份地区数据 (共 921KB) 冷启动解析仅 **10.2ms**, 查表 **5–15µs/次**。相比一次上游往返可忽略, **不要在这上面做缓存或索引优化**。唯一值得留意的是常驻内存 **13.5MB**, 对 stdio server 偏重但不致命。
+
+## 优化建议 (按性价比排序)
+
+1. **学码加负缓存** — 失败结果也写 `_DISTRICT_CODE_CACHE` (可带 TTL)。第 2 次起 728ms → 121ms, **省 83%**。一处改动, 收益最大。
+2. **学码 5 页并行** — 当前 `for page in 1..5` 纯串行。改 `ThreadPoolExecutor` 并发取页, 首次 728ms → ~245ms。与 1 叠加后该路径基本无感。
+3. **学到的码落盘** — 在 `jd_areas.json` 旁维护 `ali_district_codes.json`, 把学到的 (及确认学不到的) 区县码持久化。stdio server 每次被客户端拉起都是新进程, 进程级缓存跨会话全丢; 落盘后长期趋近 **0 次额外请求**。
+4. **冷启动预热 token** — 首次查询要多付一次 bootstrap (245ms vs 121ms)。server 启动时后台线程预热 `_bootstrap_token()`, 用户第一次调用即热态。
+5. **token 自愈加锁** — 见 P1-6。并发下会用 `None` 签名并互相踩踏, 把"一次 token 过期"放大成连环失败 + 重复 bootstrap。double-checked locking 即可。
+6. **单源工具补 try/except** — 见 P1-5。把统一工具那段兜底下沉, 让三个工具的错误语义一致。
+7. **`ali_search_judicial` 的价格单位** — 单源返回的 `currentPrice` 是**分**, 京东同名字段是**元**, 相差 100 倍, 而该工具 docstring **全文未提单位**。LLM 直接汇报会把 1.25 亿读成 1250 亿。建议单源也输出 `price_yuan`, 或至少在 docstring 和字段名上标明 (`currentPrice_fen`)。
+8. **分页语义** — 阿里 10 条/页、京东 40 条/页, 合并后按价格降序。`limit` 可到 50, 但阿里每页最多只贡献 10 条, 且跨页不是全局有序。文档里点明, 或让统一工具按 limit 自动多取阿里几页。
+
