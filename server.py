@@ -22,9 +22,32 @@ from mcp.server.fastmcp import FastMCP
 
 from ali_h5_client import (
     AliH5Client, resolve_area, resolve_area_ali,
-    validate_location_scoped, GB2260,
+    validate_location_scoped, scope_prefix, _ret0, GB2260,
 )
 from jd_h5_client import JDH5Client, JD_AREAS
+
+# 合并结果上限. 阿里 10 条/页 + 京东 40 条/页 = 合并池约 50 条.
+MAX_LIMIT = 50
+
+
+def _clamp_page(page: Any) -> int:
+    """页码归一到 ≥1. 负数/0/非数字直接透传给上游会拿到难以解释的结果."""
+    try:
+        return max(1, int(page))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _clamp_limit(limit: Any) -> int:
+    """limit 归一到 [1, MAX_LIMIT].
+
+    未校验时 limit=-1 会让 items[:-1] **静默丢掉最后一条** — 不报错, 只是少一条,
+    是最难被发现的一类缺陷。
+    """
+    try:
+        return max(1, min(int(limit), MAX_LIMIT))
+    except (TypeError, ValueError):
+        return 20
 
 # ============================================================ init
 
@@ -50,6 +73,8 @@ mcp = FastMCP(
         "4. 用户问 '排序 / 状态' 怎么改: 告诉他不能改 (固定='价格降序'+'仅进行中/即将开始').\n"
         "5. search_judicial 返回每条 item 带 `platform: 'ali'|'jd'` + 归一化 `price_yuan` (元),\n"
         "   方便上层做对比. 单源原生字段也保留 (itemId / paimaiId 等).\n"
+        "6. ⚠️ 读价格一律用 `price_yuan` (元). 两端的原生 `currentPrice` 同名不同单位 —\n"
+        "   阿里是**分**, 京东是**元**, 差 100 倍, 直接读会把 1.25 亿报成 1250 亿.\n"
     ),
 )
 
@@ -146,6 +171,7 @@ def search_judicial(
           errors?: {ali?: {...}, jd?: {...}},    # 任一端失败的诊断信息
         }
     """
+    page, limit = _clamp_page(page), _clamp_limit(limit)
     with cf.ThreadPoolExecutor(max_workers=2) as ex:
         f_ali = ex.submit(ali_search_judicial, province, city, district, page)
         f_jd  = ex.submit(jd_search_judicial,  province, city, district, page)
@@ -221,18 +247,39 @@ def ali_search_judicial(
 
     Returns:
         正常: {count, page, totalCount, items, validated, [matched_district_code], [_district_fallback]}
+              每条 item 除原生字段外带 `price_yuan` (元) —— 原生 `currentPrice` 是**分**,
+              跟京东同名字段差 100 倍, 读价格请一律用 price_yuan.
+              `validated` = 本次是否真的跑过地区守门校验.
+        地区解析不出来: {error: "area_not_resolved", message, hint}
         阿里返垃圾(乱掺其他省市): {error: "ali_returned_unscoped_results", diagnostics, items: []}
+        网络/上游异常: {error: "ali_unexpected_exception", exception, exception_type, items: []}
     """
+    try:
+        return _ali_search_impl(province, city, district, page,
+                                location_codes, fcat_v4_ids)
+    except Exception as e:
+        # 网络/超时/DNS 等异常不该以 traceback 的形式泄漏到 MCP 层,
+        # 与 search_judicial 的兜底保持一致的错误语义
+        return {"error": "ali_unexpected_exception", "exception": str(e),
+                "exception_type": type(e).__name__, "items": []}
+
+
+def _ali_search_impl(
+    province: str | None, city: str | None, district: str | None,
+    page: int, location_codes: list[str] | None,
+    fcat_v4_ids: list[str] | None,
+) -> dict:
+    """ali_search_judicial 的实现体 (不含异常兜底)."""
+    page = _clamp_page(page)
     # ---------- 解析 location_codes ----------
     fallback_used = None       # 客户端 title 过滤兜底标志
     matched_district = None    # 最终命中的区县码 (若 district 路径)
     expected_prefix = None     # 用于守门校验
 
     if location_codes:
-        # 显式编码: 透传; 守门仅按 4 位前缀校验 (escape hatch)
+        # 显式编码: 透传; 守门按该码自身的粒度校验 (escape hatch)
         first = next((c for c in location_codes if c), None)
-        if first and len(str(first)) >= 4:
-            expected_prefix = str(first)[:4]
+        expected_prefix = scope_prefix(first)
     elif district:
         if not city:
             return {"error": "district_requires_city",
@@ -240,7 +287,12 @@ def ali_search_judicial(
         # 主: legacy 数据集解析
         ali_code = resolve_area_ali(province, city, district)
         city_code = resolve_area_ali(province, city) or ""
-        expected_prefix = city_code[:4] if city_code else None
+        if not city_code:
+            # 省份都解析不到, 再往下走只会发出 ['0000'] / [''] 这类无意义编码,
+            # 白白打上游还绕过守门 (expected_prefix 为 None)
+            return {"error": "area_not_resolved",
+                    "message": f"无法解析地区 province={province!r} city={city!r}",
+                    "hint": "用 ali_get_supported_areas 查可用的省/市中文名"}
 
         is_district_hit = ali_code and ali_code != city_code and not ali_code.endswith("00")
         if is_district_hit:
@@ -256,11 +308,19 @@ def ali_search_judicial(
                 # 兜底中的兜底: 城市级查 + 客户端按 district 名 title 过滤
                 location_codes = [city_code]
                 fallback_used = "title_filter"
+        # 守门前缀按实际发出的编码推导, 而不是固定取 city_code[:4]:
+        # 直辖市的区县码 (如 310115) 其"市级"前缀是 3101, 而 city_code 是 310000.
+        expected_prefix = scope_prefix(location_codes[0])
     elif province or city:
         code = resolve_area_ali(province, city)
-        if code:
-            location_codes = [code]
-            expected_prefix = code[:4]
+        if not code:
+            return {"error": "area_not_resolved",
+                    "message": f"无法解析地区 province={province!r} city={city!r}",
+                    "hint": "用 ali_get_supported_areas 查可用的省/市中文名"}
+        location_codes = [code]
+        # 省级码 440000 → 前缀 '44' (取 [:4] 会得到 '4400', 而真实区县码是 4401xx/4403xx…,
+        # 没有一个以 '4400' 开头, 会把**全部**省级查询误判成乱掺结果)
+        expected_prefix = scope_prefix(code)
 
     # ---------- 查询 ----------
     r = ali.search_judicial(
@@ -270,8 +330,7 @@ def ali_search_judicial(
         location_codes=location_codes,
         fcat_v4_ids=fcat_v4_ids,
     )
-    ret_first = (r.get("ret") or [""])[0] if isinstance(r.get("ret"), list) else str(r.get("ret") or "")
-    if ret_first != "SUCCESS::调用成功":
+    if _ret0(r) != "SUCCESS::调用成功":
         # 非业务成功 (含 LOCAL_NON_JSON / token 错误等)
         return {"error": "mtop_call_failed", "ret": r.get("ret"),
                 "diagnostics": {k: v for k, v in r.items() if k.startswith("_")}}
@@ -285,7 +344,7 @@ def ali_search_judicial(
         meta["totalCount"] = None  # 客户端过滤后不知道真 totalCount
 
     # ---------- 垃圾结果守门 ----------
-    validated = True
+    validated = False          # 是否真的跑过校验 (无前缀可校验时为 False)
     if expected_prefix and items:
         v = validate_location_scoped(items, expected_prefix)
         if not v["ok"]:
@@ -301,6 +360,13 @@ def ali_search_judicial(
                 },
                 "items": [],
             }
+        validated = True
+
+    # 价格单位归一: 阿里 currentPrice 是**分**, 与京东的**元**同名不同单位.
+    # 单源工具也补一个 price_yuan, 避免上层/LLM 拿着分当元汇报 (差 100 倍).
+    for it in items:
+        cp = it.get("currentPrice")
+        it["price_yuan"] = (cp / 100.0) if isinstance(cp, (int, float)) else None
 
     out = {
         "totalCount": meta.get("totalCount"),
@@ -328,7 +394,7 @@ def ali_get_filter_options() -> dict:
         {dimensions: [{varName, options: [{value, name}]}]}
     """
     r = ali.get_filter_nav()
-    if r.get("ret", [""])[0] != "SUCCESS::调用成功":
+    if _ret0(r) != "SUCCESS::调用成功":
         return {"ret": r.get("ret"), "error": "filtersf-nav call failed"}
 
     cl = (((r.get("data") or {}).get("data") or {}).get("scenes") or [{}])[0]\
@@ -429,7 +495,12 @@ def jd_search_judicial(
     解析行为: 中文名模糊匹配 JD 内置地区树, 匹配不上的层级 silent skip
     (不会乱传错码触发 server 静默 fallback 到全国).
     """
-    r = jd.search_judicial(page=page, province=province, city=city, district=district)
+    page = _clamp_page(page)
+    try:
+        r = jd.search_judicial(page=page, province=province, city=city, district=district)
+    except Exception as e:
+        return {"error": "jd_unexpected_exception", "exception": str(e),
+                "exception_type": type(e).__name__, "items": []}
     if r.get("code") != 0:
         return {"code": r.get("code"), "msg": r.get("msg"), "error": "JD getSearchData failed"}
 

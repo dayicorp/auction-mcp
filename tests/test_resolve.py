@@ -7,6 +7,8 @@ JD 端: JD_AREAS 树由 getAreaInfoMap 一次性拉取(33省/455市/5344区县),
 """
 from __future__ import annotations
 
+import pytest
+
 from ali_h5_client import resolve_area, resolve_area_ali
 from jd_h5_client import JDH5Client, JD_AREAS, _match_name
 
@@ -130,3 +132,85 @@ def test_jd_resolve_unknown_silent_skip():
     sp = c._resolve_area("江苏", "苏州市", "不存在区xyz")
     assert "multiCountyIds" not in sp, "未知 district 不传 countyId"
     assert sp["multiCityIds"] == 988
+
+
+# -------------------- 回归: 同名邻区静默串区 (审计 P0-3 / P1-4) --------------------
+
+def test_resolve_ali_jingzhou_is_not_jingmen():
+    """'荆州市' 不得串到 '荆门市'.
+
+    rstrip 吃的是字符集合, "荆州市" 会被连剥 市/州 只剩 "荆", 子串匹配先命中排在前面的
+    荆门市(420800). 且守门的 expected_prefix 由同一个错码导出, 结构性发现不了 —
+    用户会拿到一份看起来完全正常、实为隔壁城市的数据.
+    """
+    assert resolve_area_ali("湖北", "荆州市") == "421000"
+    assert resolve_area_ali("湖北", "荆门市") == "420800"
+
+
+@pytest.mark.parametrize("province,city,district,expected", [
+    ("河北省", "石家庄市", "井陉县",   "130121"),   # 曾串到 井陉矿区 130107
+    ("河南省", "鹤壁市",   "淇县",     "410622"),   # 曾串到 淇滨区   410611
+    ("河南省", "新乡市",   "辉县市",   "410782"),   # 曾串到 卫辉市   410781
+    ("湖南省", "岳阳市",   "岳阳县",   "430621"),   # 曾串到 岳阳楼区 430602
+    ("广东省", "梅州市",   "梅县",     "441421"),   # 曾串到 梅江区   441402
+    ("内蒙古自治区", "鄂尔多斯市", "鄂托克旗", "150624"),  # 曾串到 鄂托克前旗 150623
+    ("山西省", "运城市",   "绛县",     "140826"),   # 曾串到 新绛县   140825
+])
+def test_resolve_ali_sibling_district_collisions(province, city, district, expected):
+    """'X县' 不得被吃成 'X' 后命中同名的 'X区'/'X矿区'/'X前旗'."""
+    assert resolve_area_ali(province, city, district) == expected
+
+
+def test_resolve_ali_full_dataset_roundtrip_is_lossless():
+    """全量往返: 数据集里每个市/区县用自己的名字查, 必须解析回自己的编码.
+
+    这条能一次性锁住所有同名邻区串区 — 历史上 legacy 有 24 处 (荆州整城 10 个区县 +
+    14 个同名邻区) 解析错误.
+    """
+    from ali_h5_client import GB2260_LEGACY, _pad_code
+    bad = []
+    for p in GB2260_LEGACY:
+        for c in p.get("children", []):
+            if resolve_area_ali(p["name"], c["name"]) != _pad_code(c["code"]):
+                bad.append((p["name"], c["name"]))
+            for d in c.get("children", []):
+                if resolve_area_ali(p["name"], c["name"], d["name"]) != _pad_code(d["code"]):
+                    bad.append((p["name"], c["name"], d["name"]))
+    assert bad == [], f"{len(bad)} 处往返误解析, 前 10: {bad[:10]}"
+
+
+# -------------------- 回归: 直辖市区县 --------------------
+
+@pytest.mark.parametrize("province,city,district,expected", [
+    ("上海", "上海市", "浦东新区", "310115"),
+    ("北京", "北京市", "朝阳区",   "110105"),
+    ("重庆", "重庆市", "渝北区",   "500112"),
+    ("天津", "天津市", "和平区",   "120101"),
+])
+def test_resolve_ali_municipality_districts(province, city, district, expected):
+    """直辖市的区县挂在 '市辖区'/'县' 中间节点下, 市名匹配不到它.
+
+    不跨中间节点找的话, 4 个直辖市的**所有**区县级查询都会退化到省级码.
+    """
+    assert resolve_area_ali(province, city, district) == expected
+
+
+# -------------------- 回归: 守门前缀粒度 (审计 P0-2) --------------------
+
+@pytest.mark.parametrize("code,expected", [
+    ("440000", "44"),      # 省级 → 2 位. 取 [:4] 得 '4400', 无真实区县码以此开头
+    ("330000", "33"),
+    ("440100", "4401"),    # 市级 → 4 位
+    ("330600", "3306"),
+    ("330621", "3306"),    # 区县级 → 退到市级粒度校验, 够用且不误杀
+    ("310115", "3101"),    # 直辖市区县
+])
+def test_scope_prefix_granularity(code, expected):
+    from ali_h5_client import scope_prefix
+    assert scope_prefix(code) == expected
+
+
+def test_scope_prefix_handles_empty():
+    from ali_h5_client import scope_prefix
+    assert scope_prefix(None) is None
+    assert scope_prefix("") is None

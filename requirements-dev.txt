@@ -1,0 +1,3 @@
+# 开发/测试依赖. 运行 server 本身不需要这些.
+-r requirements.txt
+pytest>=8.0

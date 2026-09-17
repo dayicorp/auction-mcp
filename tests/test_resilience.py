@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pytest
@@ -48,10 +49,14 @@ def _make_client_with_seed_token(monkeypatch):
 
 
 def test_call_mtop_token_self_heal_on_sign_error(monkeypatch):
-    """sign error / token expired → 清 token + 重 bootstrap + 单次重试 → 第二次成功."""
+    """sign error / token expired → 作废旧 token + 重新获取 + 单次重试 → 第二次成功.
+
+    打桩打在 _fetch_token (真正的网络边界) 上, 而不是 _bootstrap_token —
+    这样锁与双重检查的逻辑也在测试覆盖内。
+    """
     c = _make_client_with_seed_token(monkeypatch)
 
-    calls = {"do_call": 0, "bootstrap": 0}
+    calls = {"do_call": 0, "fetch": 0}
 
     expired_resp = {"ret": ["FAIL_SYS_ILLEGAL_ACCESS::Sign Error!"]}
     ok_resp = {"ret": ["SUCCESS::调用成功"], "data": {"ok": True}}
@@ -60,20 +65,70 @@ def test_call_mtop_token_self_heal_on_sign_error(monkeypatch):
         calls["do_call"] += 1
         return expired_resp if calls["do_call"] == 1 else ok_resp
 
-    def fake_bootstrap():
-        calls["bootstrap"] += 1
-        c._tk_token = "newtoken456"
+    def fake_fetch():
+        calls["fetch"] += 1
+        return f"newtoken{calls['fetch']}"
 
     monkeypatch.setattr(c, "_do_call", fake_do_call)
-    monkeypatch.setattr(c, "_bootstrap_token", fake_bootstrap)
+    monkeypatch.setattr(c, "_fetch_token", fake_fetch)
 
     out = c.call_mtop("mtop.fake.api", "1.0", {"q": 1}, method="GET")
 
     assert out["ret"] == ["SUCCESS::调用成功"]
     assert out.get("_token_refreshed") is True
     assert calls["do_call"] == 2, "应该恰好 retry 一次, 不死循环"
-    # 1 次 (call_mtop 入口) + 1 次 (自愈) = 2 次
-    assert calls["bootstrap"] == 2
+    # 入口已有 seed token 故不取; 自愈时取 1 次
+    assert calls["fetch"] == 1
+    assert c._tk_token == "newtoken1", "自愈后应换上新 token"
+
+
+def test_bootstrap_token_is_fetched_once_under_concurrency(monkeypatch):
+    """并发冷启动: 双重检查加锁, N 个线程只应触发 1 次 token 获取."""
+    import threading
+
+    c = AliH5Client()
+    c._tk_token = None
+    calls = {"fetch": 0}
+
+    def slow_fetch():
+        calls["fetch"] += 1
+        time.sleep(0.05)          # 模拟一次网络往返
+        return "tok_concurrent"
+
+    monkeypatch.setattr(c, "_fetch_token", slow_fetch)
+
+    threads = [threading.Thread(target=c._bootstrap_token) for _ in range(8)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    assert calls["fetch"] == 1, f"8 个线程应只取 1 次 token, 实际 {calls['fetch']} 次"
+    assert c._tk_token == "tok_concurrent"
+
+
+def test_invalidate_token_is_idempotent_across_threads(monkeypatch):
+    """并发自愈: 只有持有当前 token 的那次作废生效, 后到的线程复用已刷新的结果.
+
+    历史缺陷: 自愈期间 _tk_token 被置 None, 另一线程会拿 None 去签名, 把一次 token
+    过期放大成连环 Sign Error + 重复 bootstrap.
+    """
+    c = AliH5Client()
+    c._tk_token = "stale"
+    calls = {"fetch": 0}
+
+    def fake_fetch():
+        calls["fetch"] += 1
+        return "fresh"
+
+    monkeypatch.setattr(c, "_fetch_token", fake_fetch)
+
+    # 两个线程都拿着同一个 stale token 撞上 sign error
+    import threading
+    ts = [threading.Thread(target=c._invalidate_token, args=("stale",)) for _ in range(5)]
+    for t in ts: t.start()
+    for t in ts: t.join()
+
+    assert calls["fetch"] == 1, f"同一个 stale token 只该换一次, 实际 {calls['fetch']} 次"
+    assert c._tk_token == "fresh"
 
 
 def test_call_mtop_no_retry_on_business_failure(monkeypatch):

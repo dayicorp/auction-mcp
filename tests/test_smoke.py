@@ -7,7 +7,7 @@ L1  以真实 MCP client 起 server.py 子进程, 走 initialize / tools/list / 
 L2  httpx.MockTransport 扮演"完全配合"的上游, 跑 解析→组包→解析响应→归一→合并→信封
 
 L2 的上游**如实按请求的编码返回该地区的正确数据**, 因此任何错误结果都只可能是客户端自身缺陷。
-标 xfail(strict) 的三项即审计中的 P0, 修好后会 XPASS, pytest 会提示摘掉标记。
+「审计缺陷的回归测试」一节锁的是已修复的 P0-2 / P0-3 / P1-5, 防止回潮。
 """
 from __future__ import annotations
 
@@ -143,24 +143,22 @@ def test_pipeline_unified_merges_both_sources_and_normalizes_unit(smoke_server):
     assert prices == sorted(prices, reverse=True)
 
 
-def test_pipeline_unified_degrades_when_one_source_fails(smoke_server):
+def test_pipeline_unified_degrades_when_one_source_fails(smoke_server, monkeypatch):
     """单端异常时统一工具照常返回另一端 + 结构化 errors (已有行为, 锁住不回归)."""
     server, _ = smoke_server
 
     def boom(*a, **k):
         raise httpx.ConnectError("upstream down")
 
-    server.ali.search_judicial = boom
+    monkeypatch.setattr(server.ali, "search_judicial", boom)
     r = server.search_judicial(province="广东", city="广州市", limit=5)
     assert r["sources"] == ["jd"]
     assert "ali" in r["errors"]
     assert r["count"] > 0
 
 
-# ============================================================ L2: 审计中的 P0 (修好后会 XPASS)
+# ============================================================ L2: 审计缺陷的回归测试
 
-@pytest.mark.xfail(strict=True, reason="P0-2: 省级 expected_prefix 取 code[:4] 得 '4400', "
-                                       "无真实区县码以此开头, 守门 100% 误杀省级查询")
 def test_province_level_query_not_falsely_rejected(smoke_server):
     """上游返回的全是合法广东标的, 省级查询不该被自己的守门判成 unscoped."""
     server, _ = smoke_server
@@ -169,8 +167,6 @@ def test_province_level_query_not_falsely_rejected(smoke_server):
     assert r["count"] == len(GD_PROVINCE)
 
 
-@pytest.mark.xfail(strict=True, reason="P0-3: rstrip 字符集把 '荆州市' 连剥 市/州 只剩 '荆', "
-                                       "子串匹配先命中荆门市(420800), 守门因同源错码而无法发现")
 def test_jingzhou_does_not_silently_resolve_to_jingmen(smoke_server):
     """查荆州必须发荆州的码 4210xx, 且拿回荆州的标的 — 不能静默串到荆门."""
     server, sent = smoke_server
@@ -180,16 +176,14 @@ def test_jingzhou_does_not_silently_resolve_to_jingmen(smoke_server):
     assert all(str(it["locationCode"]).startswith("4210") for it in r["items"])
 
 
-@pytest.mark.xfail(strict=True, reason="P1-5: 单源工具无 try/except, 网络异常裸抛, "
-                                       "MCP 层只能返回 traceback 字符串")
-def test_single_source_tools_return_structured_error_on_network_failure(smoke_server):
+def test_single_source_tools_return_structured_error_on_network_failure(smoke_server, monkeypatch):
     """单源工具遇网络故障应像统一工具那样返回结构化错误, 而非抛异常."""
     server, _ = smoke_server
 
     def boom(*a, **k):
         raise httpx.ConnectError("upstream down")
 
-    server.ali.search_judicial = boom
+    monkeypatch.setattr(server.ali, "search_judicial", boom)
     r = server.ali_search_judicial(province="广东", city="广州市")
     assert isinstance(r, dict) and r.get("error")
 
@@ -225,3 +219,71 @@ async def test_mcp_protocol_handshake_and_zero_network_tools():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+# ============================================================ L2: 参数与语义回归
+
+@pytest.mark.parametrize("limit,expected", [
+    (0, 1),          # 下界
+    (-1, 1),         # 曾让 items[:-1] 静默丢掉最后一条
+    (10 ** 9, 50),   # 上界 MAX_LIMIT
+    ("abc", 20),     # 非数字 → 默认值
+])
+def test_limit_is_clamped(smoke_server, limit, expected):
+    """limit 归一到 [1, 50]. 负数尤其危险: 不报错, 只是悄悄少一条."""
+    server, _ = smoke_server
+    r = server.search_judicial(province="广东", city="广州市", limit=limit)
+    assert r["count"] == min(expected, len(GZ_CITY) + 3)
+
+
+def test_page_is_clamped(smoke_server):
+    """页码归一到 ≥1, 不把 0/负数透传给上游."""
+    server, _ = smoke_server
+    assert server.search_judicial(province="广东", city="广州市", page=-5)["page"] == 1
+    assert server.search_judicial(province="广东", city="广州市", page=0)["page"] == 1
+
+
+def test_unresolvable_area_returns_structured_error(smoke_server):
+    """省份解析不出来时直接报错, 而不是发出 ['0000'] / [''] 这类无意义编码去打上游.
+
+    历史行为: 未知省份 + district 会先用 '0000' 翻 5 页学码, 再用 '' 查一次,
+    且因 expected_prefix 为 None 而**绕过守门**.
+    """
+    server, sent = smoke_server
+    r = server.ali_search_judicial(province="火星省", city="火星市", district="火星区")
+    assert r["error"] == "area_not_resolved"
+    assert sent == [], "解析失败不应产生任何上游请求"
+
+
+def test_ali_single_source_exposes_price_yuan(smoke_server):
+    """单源阿里结果也带 price_yuan (元).
+
+    阿里 currentPrice 是**分**, 京东同名字段是**元**, 相差 100 倍. 单源只给 currentPrice
+    的话, LLM 直接汇报会把 1.25 亿读成 1250 亿.
+    """
+    server, _ = smoke_server
+    r = server.ali_search_judicial(province="广东", city="广州市")
+    top = r["items"][0]
+    assert top["currentPrice"] == ALI_PRICE_FEN
+    assert top["price_yuan"] == pytest.approx(ALI_PRICE_FEN / 100.0)
+
+
+def test_learn_district_code_negative_result_is_cached(smoke_server, monkeypatch):
+    """学不到的区县要负缓存: 第二次查同一个区县不得再打上游.
+
+    历史行为: 失败结果不入缓存, 每次重查都重新翻 max_pages 页 (实测 6 次上游 / 728ms).
+    """
+    import ali_h5_client
+    monkeypatch.setattr(ali_h5_client, "_DISTRICT_CODE_CACHE", {})
+    server, sent = smoke_server
+
+    # 上游返回的标的标题里没有该区县名 → 必然学不到
+    first = server.ali.learn_district_code_from_city("330600", "不存在区")
+    n_first = len(sent)
+    assert first is None
+    assert n_first > 0, "首次应真的去翻页"
+
+    sent.clear()
+    second = server.ali.learn_district_code_from_city("330600", "不存在区")
+    assert second is None
+    assert sent == [], f"第二次应命中负缓存, 实际又打了 {len(sent)} 次上游"

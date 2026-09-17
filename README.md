@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-47%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-67%20offline%20%2B%2019%20live-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
@@ -22,10 +22,11 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ## 核心特性
 
 - **双端聚合, 一次拿全量** — `search_judicial` 并行打阿里+京东, 价格降序合并, 单位归一到元, 加 `platform` 字段标源
-- **三级地区精准查询** — 全国 31 省 / 3146 区县 (阿里) + 33 省 / 5344 区县 (京东), 中文名直传
+- **三级地区精准查询** — 全国 3146 区县 (阿里 legacy vintage) + 5344 区县 (京东), 中文名直传,
+  含 4 个直辖市的区县; 全量数据集往返零误解析
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **47 个 pytest 测试** — 单元 + 容错 + 集成
+- **86 个 pytest 测试** — 67 项零网络 (单元/容错/协议层冒烟/全链路冒烟) + 19 项真打线上
 
 ## Quick start
 
@@ -43,10 +44,14 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```
 
 ```bash
-pip install -r requirements.txt    # mcp, httpx, pytest
-pytest                             # 单元 + 容错 (零网络)
-pytest --run-live                  # + 集成 (真打 Ali/JD API)
+pip install -r requirements.txt        # 运行期: mcp (<2), httpx
+pip install -r requirements-dev.txt    # + pytest, 跑测试才需要
+pytest                                 # 67 项零网络: 单元 + 容错 + 冒烟 (协议层/全链路)
+pytest --run-live                      # + 19 项集成 (真打 Ali/JD API)
 ```
+
+> ⚠️ `mcp` 必须 `<2`. mcp 2.x 把 `FastMCP` 改名成 `MCPServer` 并移除了 `mcp.server.fastmcp`,
+> 装到 2.x 会在 import 阶段直接失败.
 
 ## 工具 (6 个)
 
@@ -58,6 +63,9 @@ pytest --run-live                  # + 集成 (真打 Ali/JD API)
 | `ali_get_filter_options` | (无) | 阿里 9 个 filter 维度的完整可选项 |
 | `jd_search_judicial` | `province?`, `city?`, `district?`, `page=1` | [Advanced 单源] 仅查京东 |
 | `jd_get_supported_areas` | `province?`, `city?` | 列京东支持的省/市/区县中文名 |
+
+> **价格单位**: 两端的原生 `currentPrice` 同名不同单位 (阿里是**分**, 京东是**元**, 差 100 倍).
+> 所有工具都额外输出归一到元的 `price_yuan` — 读价格一律用它, 别直接读 `currentPrice`.
 
 > 阿里和京东是**两个独立标的池, 不重复**: 阿里偏机构端高价资产 (亿级土地/在建工程), 京东偏散户端住宅/股权/小额债权. 默认调 `search_judicial` 拿双端聚合.
 

@@ -1,3 +1,5 @@
-mcp>=1.0
+# 运行期依赖.
+# mcp 2.x 把 FastMCP 改名为 MCPServer 并移除了 mcp.server.fastmcp,
+# server.py 目前用的是 v1 API, 故上钉 <2 (不钉的话全新安装会直接 ImportError).
+mcp>=1.0,<2
 httpx>=0.27
-pytest>=8.0

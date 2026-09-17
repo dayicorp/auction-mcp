@@ -15,7 +15,7 @@
 完全 bypass app 端 unifiedSign + wua + sgext anti-tamper.
 """
 from __future__ import annotations
-import hashlib, json, os, time
+import concurrent.futures as cf, hashlib, json, os, threading, time
 from typing import Any
 import httpx
 
@@ -42,32 +42,102 @@ def _pad_code(code: str) -> str:
     return (code + "0000")[:6]
 
 
+# 行政区划后缀. 注意 str.rstrip 吃的是**字符集合**而非后缀串, 所以 "荆州市" 会被连剥
+# 市/州 只剩 "荆" — 这正是历史上 "荆州市" 静默串到 "荆门市" 的根因. 因此下面的匹配
+# 必须 **精确优先**, 只把去后缀当作最后的模糊兜底.
+_SFX_PROV = "省市自治区"
+_SFX_CITY = "市地区州盟自治州"
+_SFX_DIST = "区县市旗"
+
+
+def _pick(candidates: list[dict[str, Any]], query: str,
+          suffixes: str) -> dict[str, Any] | None:
+    """按 精确 → 去后缀后精确 → 前缀 三级匹配. 不做无序子串匹配.
+
+    子串匹配 ("荆" in "荆门市") 会让短名命中排在前面的**兄弟行政区**, 且因为上层的
+    expected_prefix 由同一个错码导出, 守门结构性发现不了. 三级匹配把这类静默串区消灭。
+    """
+    if not query:
+        return None
+    for c in candidates:                                    # 1. 精确
+        if c["name"] == query:
+            return c
+    q = query.rstrip(suffixes)
+    if q:
+        for c in candidates:                                # 2. 去后缀后精确
+            if c["name"].rstrip(suffixes) == q:
+                return c
+    for c in candidates:                                    # 3. 前缀 (模糊兜底)
+        if c["name"].startswith(query) or (q and c["name"].startswith(q)):
+            return c
+    return None
+
+
+def _municipality_district(p_match: dict[str, Any],
+                           district: str) -> dict[str, Any] | None:
+    """直辖市: 区县挂在 '市辖区' / '县' 这层中间节点下, 需要跨中间节点找.
+
+    北京/上海/天津/重庆 的 legacy 结构是 省 → 市辖区|县 → 区县, 市名 ("上海市") 匹配不到
+    中间节点, 若不特殊处理, 区县级查询会一路退化到省级码。
+    """
+    for sub in p_match.get("children", []):
+        hit = _pick(sub.get("children", []), district, _SFX_DIST)
+        if hit:
+            return hit
+    return None
+
+
 def _resolve_in(dataset: list[dict[str, Any]],
                 province: str | None, city: str | None,
                 district: str | None) -> str | None:
-    """通用的省/市/区中文名 → GB 2260 6 位编码解析器. dataset 决定 vintage."""
+    """通用的省/市/区中文名 → GB 2260 6 位编码解析器. dataset 决定 vintage.
+
+    解析不到的层级会**逐级降级**返回上一级编码 (区→市→省), 上层据此判断是否需要走
+    动态学码兜底. 省份都解析不到才返回 None.
+    """
     if not province:
         return None
-    pn = province.rstrip("省市自治区")
-    p_match = next((p for p in dataset
-                    if pn in p["name"] or p["name"].startswith(pn)), None)
+    p_match = _pick(dataset, province, _SFX_PROV)
     if not p_match:
         return None
     if not city:
         return _pad_code(p_match["code"])
-    cn = city.rstrip("市地区州盟自治州")
-    c_match = next((c for c in p_match.get("children", [])
-                    if cn in c["name"] or c["name"].startswith(cn)), None)
+
+    c_match = _pick(p_match.get("children", []), city, _SFX_CITY)
     if not c_match:
+        # 直辖市: "上海市" 匹配不到 "市辖区"/"县" 这层中间节点, 但区县确实在下面
+        if district:
+            hit = _municipality_district(p_match, district)
+            if hit:
+                return _pad_code(hit["code"])
         return _pad_code(p_match["code"])
+
     if not district:
         return _pad_code(c_match["code"])
-    dn = district.rstrip("区县市旗")
-    d_match = next((d for d in c_match.get("children", [])
-                    if dn in d["name"] or d["name"].startswith(dn)), None)
+    d_match = _pick(c_match.get("children", []), district, _SFX_DIST)
     if not d_match:
         return _pad_code(c_match["code"])
     return _pad_code(d_match["code"])
+
+
+def scope_prefix(code: str | None) -> str | None:
+    """由"实际发给阿里的编码"推出守门该用的前缀粒度.
+
+    省级 440000 → '44';  市级 440100 → '4401';  区县级 330621 → '3306'.
+
+    守门要拦的是"阿里不认编码时静默返回的**全国乱掺**数据", 因此区县级查询退到
+    市级粒度校验即可, 既够用又不会误杀。历史缺陷正是省级也一律取 code[:4] 得到
+    '4400', 而真实区县码是 4401xx/4403xx…, 没有一个以 '4400' 开头, 于是省级查询
+    100% 被自己的守门误杀。
+    """
+    if not code:
+        return None
+    c = _pad_code(str(code))
+    if len(c) < 6:
+        return None
+    if c.endswith("0000"):
+        return c[:2]
+    return c[:4]
 
 
 def resolve_area(province: str | None = None, city: str | None = None,
@@ -85,8 +155,18 @@ def resolve_area_ali(province: str | None = None, city: str | None = None,
 
 # ============================================================ 守门 + 兜底
 
-# 进程级缓存: (city_4digit_prefix, district_name) -> Ali-vintage 区县编码
-_DISTRICT_CODE_CACHE: dict[tuple[str, str], str] = {}
+# 进程级缓存: (city_4digit_prefix, district_name) -> Ali-vintage 区县编码.
+# 值为 None 表示**确认学不到** (负缓存) — 没有它的话, 每次重查同一个学不到的区县
+# 都要重新翻 max_pages 页真实请求 (实测 6 次上游 / 728ms), 纯属重复付费。
+_DISTRICT_CODE_CACHE: dict[tuple[str, str], str | None] = {}
+
+
+def _ret0(resp: dict[str, Any]) -> str:
+    """安全取 mtop 响应的首个 ret 串. ret 可能是 list / str / None, 一律归一成 str."""
+    ret = resp.get("ret") if isinstance(resp, dict) else None
+    if isinstance(ret, list):
+        return str(ret[0]) if ret else ""
+    return str(ret) if ret else ""
 
 
 def validate_location_scoped(items: list[dict[str, Any]],
@@ -135,11 +215,25 @@ class AliH5Client:
             timeout=20.0,
         )
         self._tk_token: str | None = None
+        # 保护 _tk_token 的获取与作废. FastMCP 把同步工具丢进 worker 线程池, 并发请求
+        # 会同时操作这一个 client; 没有锁的话, 自愈期间 (清 token → 一次网络往返) 另一个
+        # 线程会拿 None 去签名, 把"一次 token 过期"放大成连环 Sign Error + 重复 bootstrap.
+        self._tk_lock = threading.Lock()
 
     def _bootstrap_token(self):
-        """Hit any mtop endpoint to make server set _m_h5_tk cookie."""
+        """Hit any mtop endpoint to make server set _m_h5_tk cookie.
+
+        双重检查加锁: 锁外快速放行热路径, 锁内再确认一次 — 避免并发线程重复 bootstrap.
+        """
         if self._tk_token:
             return
+        with self._tk_lock:
+            if self._tk_token:      # 等锁期间已被别的线程刷新
+                return
+            self._tk_token = self._fetch_token()
+
+    def _fetch_token(self) -> str:
+        """真正去拿 _m_h5_tk cookie. 调用方须持有 _tk_lock."""
         # touching any mtop endpoint (even a 'TOKEN_EMPTY' error) makes server set _m_h5_tk
         url = f"{H5_GATEWAY}/h5/mtop.taobao.datafront.invoke.auctionwalle/1.0/"
         params = {
@@ -155,7 +249,24 @@ class AliH5Client:
             tk_full = self.s.cookies.get("_m_h5_tk")
         if not tk_full or "_" not in tk_full:
             raise RuntimeError("failed to obtain _m_h5_tk cookie")
-        self._tk_token = tk_full.split("_", 1)[0]
+        return tk_full.split("_", 1)[0]
+
+    def _invalidate_token(self, stale: str | None):
+        """作废一个已确认失效的 token 并立即换新. 幂等: 若已被别的线程换过就不重复做.
+
+        stale 是调用方签名时用的那个 token — 只有它仍是当前值才动手, 否则说明另一个
+        线程已经完成自愈, 直接复用其结果即可。
+        """
+        with self._tk_lock:
+            if self._tk_token != stale:
+                return                       # 已被别的线程刷新过
+            self._tk_token = None
+            try:
+                self.s.cookies.delete("_m_h5_tk")
+                self.s.cookies.delete("_m_h5_tk_enc")
+            except Exception:
+                pass
+            self._tk_token = self._fetch_token()
 
     def _sign(self, t_ms: str, data_str: str) -> str:
         raw = f"{self._tk_token}&{t_ms}&{H5_APPKEY}&{data_str}"
@@ -201,22 +312,13 @@ class AliH5Client:
         - token 过期/sign 错时, 清缓存重 bootstrap 单次重试 (服务过夜后 _m_h5_tk 会过期, 此处自愈)
         """
         self._bootstrap_token()
+        used_token = self._tk_token          # 本次签名用的 token, 自愈时据此判断是否已被换过
         data_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
         resp = self._do_call(api, version, data_str, method)
-        ret0 = ""
-        try:
-            ret0 = (resp.get("ret") or [""])[0]
-        except Exception:
-            pass
+        ret0 = _ret0(resp)
         if any(m in ret0 for m in self._TOKEN_ERROR_MARKERS):
-            # 单次自愈重试: 清 token + cookie, 重 bootstrap, 再调一次
-            self._tk_token = None
-            try:
-                self.s.cookies.delete("_m_h5_tk")
-                self.s.cookies.delete("_m_h5_tk_enc")
-            except Exception:
-                pass
-            self._bootstrap_token()
+            # 单次自愈重试: 作废旧 token (幂等, 并发安全) + 重新获取, 再调一次
+            self._invalidate_token(used_token)
             resp = self._do_call(api, version, data_str, method)
             # 标记一下让上层/测试知道发生过自愈 (不影响业务字段)
             resp["_token_refreshed"] = True
@@ -297,40 +399,53 @@ class AliH5Client:
 
         Returns: 命中的 locationCode (6 位字符串) 或 None
         """
-        # 缓存键: 4 位城市前缀 + 去后缀的区县名
-        key = (city_code[:4], district_name.rstrip("区县市旗"))
+        if not city_code:
+            return None
+        # 缓存键: 4 位城市前缀 + 去后缀的区县名. 命中与"确认学不到"都缓存.
+        key = (city_code[:4], district_name.rstrip(_SFX_DIST))
         if key in _DISTRICT_CODE_CACHE:
             return _DISTRICT_CODE_CACHE[key]
 
         # 待匹配的目标 (短名 / 全名都接受)
-        targets = {district_name, district_name.rstrip("区县市旗")}
+        targets = {district_name, district_name.rstrip(_SFX_DIST)}
         targets = {t for t in targets if t}
 
         loc = _pad_code(city_code)
-        for page in range(1, max_pages + 1):
+
+        def fetch(page: int) -> list[dict[str, Any]]:
             r = self.search_judicial(page=page, location_codes=[loc])
             scenes = ((r.get("data") or {}).get("data") or {}).get("scenes") or []
             if not scenes:
-                break
+                return []
             sl = (scenes[0].get("schemeList") or [{}])[0]
-            content_list = sl.get("contentList") or []
-            if not content_list:
-                break
+            return sl.get("contentList") or []
+
+        def scan(content_list: list[dict[str, Any]]) -> str | None:
             for it in content_list:
                 em = it.get("extraMap") or {}
                 title = em.get("title") or it.get("title") or ""
                 if not any(t and t in title for t in targets):
                     continue
                 lc = em.get("locationCode") or it.get("locationCode")
-                if lc is None:
-                    continue
-                lcs = str(lc)
-                _DISTRICT_CODE_CACHE[key] = lcs
-                return lcs
-            # 没分页信息时 contentList 不满一页就停
-            if len(content_list) < 10:
-                break
-        return None
+                if lc is not None:
+                    return str(lc)
+            return None
+
+        # 第一页单独取: 多数情况首页就能命中, 且能据此判断是否还有后续页,
+        # 避免为一个只有几条标的的小城市白白并发打满 max_pages.
+        first = fetch(1)
+        hit = scan(first)
+        if hit is None and len(first) >= 10 and max_pages > 1:
+            # 剩余页并行取 — 原先是串行 for 循环, 实测 5 页 = 5 个往返
+            with cf.ThreadPoolExecutor(max_workers=min(max_pages - 1, 4)) as ex:
+                futures = [ex.submit(fetch, p) for p in range(2, max_pages + 1)]
+                for f in futures:
+                    try:
+                        hit = hit or scan(f.result())
+                    except Exception:
+                        continue
+        _DISTRICT_CODE_CACHE[key] = hit      # hit 为 None 时即负缓存
+        return hit
 
     def get_filter_nav(self) -> dict[str, Any]:
         """拉所有 filter 维度的可选项 (sort/fcatV4Ids/circs/statusOrders/tagIds/zcBizTypes)."""
