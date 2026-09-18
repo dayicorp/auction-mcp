@@ -100,6 +100,17 @@ mcp = FastMCP(
         "   方便上层做对比. 单源原生字段也保留 (itemId / paimaiId 等).\n"
         "6. ⚠️ 读价格一律用 `price_yuan` (元). 两端的原生 `currentPrice` 同名不同单位 —\n"
         "   阿里是**分**, 京东是**元**, 差 100 倍, 直接读会把 1.25 亿报成 1250 亿.\n"
+        "\n"
+        "7. ★ 阿里侧每条 item 自带硬事实 (**匿名可得, 不必再调详情接口**,\n"
+        "   2026-09-18 与官方详情接口交叉验证过): bail_yuan(保证金,元) /\n"
+        "   increment_yuan(加价幅度,元) / building_area_sqm(建筑面积,㎡) /\n"
+        "   land_area_sqm(土地面积,㎡) / land_purpose(**中文土地用途**) /\n"
+        "   consult_unit_price_yuan_per_sqm(评估单价,元/㎡) /\n"
+        "   consult_price_yuan(**评估总价,元**).\n"
+        "   consult_price_yuan 由评估单价 × 建筑面积推出(平台不直接给), 已验证与详情接口一致;\n"
+        "   缺任一项时该字段不出现 — 字段不存在不等于评估价为零.\n"
+        "   判断是不是工业类资产**以 land_purpose 为准**, 比标题关键词可靠.\n"
+        "   重整投资人资格 / 股权 / 债权一类标的通常没有面积与评估单价.\n"
         "7. ⚠️ 汇报前先看 `area_applied`: 某端为 false 表示**该端的结果没有按你要的地区收窄**\n"
         "   (例如省份对但城市名它不认, 结果退到了省级). 别把它当成该地区的数据汇报.\n"
         "   地区两端都没生效时直接返 `error: area_not_resolved`, 不会给你全国数据冒充.\n"
@@ -116,6 +127,38 @@ ali = AliH5Client()
 jd = JDH5Client()
 
 # ============================================================ tools: 阿里司法拍卖 (H5 mtop)
+
+def _extra_facts(em: dict) -> dict:
+    """extraMap 里的硬事实. 单位 2026-09-18 用两条已知标的与官方详情接口交叉验证:
+
+    - bail / incrementnum 单位是**分**, 与 currentPrice 一致
+      (运河路西 bail=7229000000 ↔ queryHttpsItemDetail 的 foregiftPrice 7229 万)
+    - hArea(房屋建筑面积) / landArea(土地面积) 单位是**平方米 × 100**
+      (南湖路 37 号 landArea=1563050 ↔ 法院公告 15630.50 ㎡)
+    - consulteUnitPrice 单位是**元/㎡**; 乘以 hArea/100 即评估总价
+      (运河路西 8133.83 × 69433.89 = 5.6476 亿 ↔ 详情接口 consultPrice 5.6476 亿)
+
+    ★ 这些字段**匿名可得**, 不需要登录详情接口. landPurpose 是中文土地用途,
+      判断资产类型以它为准, 比标题关键词可靠.
+    """
+    def cent(v):
+        return round(v / 100.0, 2) if isinstance(v, (int, float)) else None
+
+    area = cent(em.get("hArea"))
+    unit = em.get("consulteUnitPrice") or None
+    out = {
+        "bail_yuan":          cent(em.get("bail")),
+        "increment_yuan":     cent(em.get("incrementnum")),
+        "building_area_sqm":  area,
+        "land_area_sqm":      cent(em.get("landArea")),
+        "land_purpose":       em.get("landPurpose"),
+        "consult_unit_price_yuan_per_sqm": unit,
+        # 评估总价: 平台不直接给, 由单价 × 建筑面积推出, 已交叉验证与详情接口一致
+        "consult_price_yuan": round(unit * area, 2) if (unit and area) else None,
+        "subsidy_price":      em.get("subsidyPrice") or None,
+    }
+    return {k: v for k, v in out.items() if v not in (None, "", 0)}
+
 
 def _extract_items(raw: dict) -> tuple[list[dict], dict]:
     """从 ali.search_judicial 原始响应抽 items + meta. 返回 (items, {totalCount, page, pageSize})."""
@@ -145,6 +188,7 @@ def _extract_items(raw: dict) -> tuple[list[dict], dict]:
             "bizType":     em.get("bizType") or it.get("bizType"),
             "headerPicUrls": em.get("headerPicUrls"),
             "subscribeCnt": em.get("subscribeCnt") or it.get("subscribeCnt"),
+            **_extra_facts(em),
         })
     meta = {"totalCount": sl.get("totalCount"), "page": sl.get("page"),
             "pageSize": sl.get("pageSize") or 10}
