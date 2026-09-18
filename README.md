@@ -3,7 +3,7 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-67%20offline%20%2B%2019%20live-brightgreen)
+![Tests](https://img.shields.io/badge/tests-102%20offline%20%2B%2019%20live-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
@@ -26,7 +26,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
   含 4 个直辖市的区县; 全量数据集往返零误解析
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **86 个 pytest 测试** — 67 项零网络 (单元/容错/协议层冒烟/全链路冒烟) + 19 项真打线上
+- **121 个 pytest 测试** — 102 项零网络 (单元/容错/协议层冒烟/全链路冒烟) + 19 项真打线上
 
 ## Quick start
 
@@ -46,7 +46,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```bash
 pip install -r requirements.txt        # 运行期: mcp (<2), httpx
 pip install -r requirements-dev.txt    # + pytest, 跑测试才需要
-pytest                                 # 67 项零网络: 单元 + 容错 + 冒烟 (协议层/全链路)
+pytest                                 # 102 项零网络: 单元 + 容错 + 冒烟 (协议层/全链路)
 pytest --run-live                      # + 19 项集成 (真打 Ali/JD API)
 ```
 
@@ -57,7 +57,7 @@ pytest --run-live                      # + 19 项集成 (真打 Ali/JD API)
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| ⭐ **`search_judicial`** | `province?`, `city?`, `district?`, `page=1`, `limit=20` | **推荐默认调用** — 并行查 阿里+京东, 价格降序合并, 单位归一到元 |
+| ⭐ **`search_judicial`** | `province?`, `city?`, `district?`, `page=1`, `limit=50` | **推荐默认调用** — 并行查 阿里+京东, 价格降序合并, 单位归一到元 |
 | `ali_search_judicial` | `province?`, `city?`, `district?`, `page=1` | [Advanced 单源] 仅查阿里 |
 | `ali_get_supported_areas` | `province?`, `city?` | 列阿里支持的省/市/区县中文名 |
 | `ali_get_filter_options` | (无) | 阿里 9 个 filter 维度的完整可选项 |
@@ -84,10 +84,15 @@ search_judicial(province="四川", city="成都市", district="武侯区")
 返回 envelope:
 ```jsonc
 {
-  "count": 10,
+  "count": 50,
+  "dropped": 0,               // 本页取回但被 limit 截掉的条数, 这些不会进下一页
   "ali_totalCount": 1234,
   "jd_count": 40,
   "sources": ["ali", "jd"],
+  "area_applied": {           // 传了地区参数时才有
+    "ali": true,              // false = 该端结果没按你要的地区收窄 (如退到了省级)
+    "jd": true
+  },
   "items": [
     {
       "platform": "ali",          // 或 "jd"
@@ -99,6 +104,14 @@ search_judicial(province="四川", city="成都市", district="武侯区")
   ]
 }
 ```
+
+> **地区没生效时不会拿全国数据冒充**: 两端都解析不出地区 (省名拼错、只传 district 不传 city)
+> 直接返 `{"error": "area_not_resolved", "items": []}`; 只有部分层级没应用 (如省对城市名不认)
+> 则正常返数据但把 `area_applied` 标成 false —— **汇报前先看这个字段**.
+
+> **`limit` 是本页展示上限, 不是分页窗口**: 被截掉的标的**不会**出现在 `page+1` (两端各自按
+> 自己的页大小翻页, 合并层没有游标), `dropped` 会告诉你截了多少. 默认 50 = 满池, 不丢数据.
+> 「价格降序」只在**单页内**成立, 跨页不保证单调.
 
 ## ⚠️ 阿里区县编码 vintage 坑
 
@@ -131,7 +144,7 @@ auction-mcp/
 ├── gb2260.json          # GB 2260 2020 版 (展示用, 不用于查询)
 ├── gb2260_200712.json   # GB 2260 pre-2013 (阿里 server 实际接受的 vintage)
 ├── jd_areas.json        # 京东 33 省/455 市/5344 区县地区树
-└── tests/               # 47 项 pytest (resolve / validation / resilience / live_ali / live_jd)
+└── tests/               # 121 项 pytest (resolve / validation / resilience / smoke / live_ali / live_jd)
 ```
 
 ### 为什么是纯 httpx

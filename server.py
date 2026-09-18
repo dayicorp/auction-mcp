@@ -23,8 +23,9 @@ from mcp.server.fastmcp import FastMCP
 from ali_h5_client import (
     AliH5Client, resolve_area, resolve_area_ali,
     validate_location_scoped, scope_prefix, _ret0, GB2260,
+    _pick, _SFX_PROV, _SFX_CITY,
 )
-from jd_h5_client import JDH5Client, JD_AREAS
+from jd_h5_client import JDH5Client, JD_AREAS, MUNICIPALITIES as JD_MUNICIPALITIES
 
 # 合并结果上限. 阿里 10 条/页 + 京东 40 条/页 = 合并池约 50 条.
 MAX_LIMIT = 50
@@ -36,6 +37,30 @@ def _clamp_page(page: Any) -> int:
         return max(1, int(page))
     except (TypeError, ValueError):
         return 1
+
+
+# 直辖市省级码 — 省与市是同一级, 省级码就已经等于"市级已收窄", 不该判成 city 未应用.
+_MUNICIPALITY_CODES = {"110000", "120000", "310000", "500000"}
+
+
+def _requested_level(province: Any, city: Any, district: Any) -> int:
+    """调用方要求收窄到第几级: 0=全国 1=省 2=市 3=区县."""
+    if district: return 3
+    if city:     return 2
+    if province: return 1
+    return 0
+
+
+def _code_level(code: Any) -> int:
+    """由实际发出的 GB 2260 码反推它真的收窄到第几级."""
+    if not code:
+        return 0
+    c = str(code)
+    if c.endswith("0000"):
+        return 2 if c in _MUNICIPALITY_CODES else 1
+    if c.endswith("00"):
+        return 2
+    return 3
 
 
 def _clamp_limit(limit: Any) -> int:
@@ -75,6 +100,12 @@ mcp = FastMCP(
         "   方便上层做对比. 单源原生字段也保留 (itemId / paimaiId 等).\n"
         "6. ⚠️ 读价格一律用 `price_yuan` (元). 两端的原生 `currentPrice` 同名不同单位 —\n"
         "   阿里是**分**, 京东是**元**, 差 100 倍, 直接读会把 1.25 亿报成 1250 亿.\n"
+        "7. ⚠️ 汇报前先看 `area_applied`: 某端为 false 表示**该端的结果没有按你要的地区收窄**\n"
+        "   (例如省份对但城市名它不认, 结果退到了省级). 别把它当成该地区的数据汇报.\n"
+        "   地区两端都没生效时直接返 `error: area_not_resolved`, 不会给你全国数据冒充.\n"
+        "8. `limit` 是本页展示上限而非分页窗口 —— 被截掉的标的**不会**出现在下一页,\n"
+        "   `dropped` 会告诉你截了多少. 要完整浏览就别改默认值 (50 = 满池).\n"
+        "   「价格降序」只在**单页内**成立, 跨页不保证单调.\n"
     ),
 )
 
@@ -148,7 +179,7 @@ def search_judicial(
     city: str | None = None,
     district: str | None = None,
     page: int = 1,
-    limit: int = 20,
+    limit: int = MAX_LIMIT,
 ) -> dict:
     """**统一搜索 (推荐默认调用此工具)** — 同时查 阿里 + 京东 司法拍卖, 并行打两端,
     价格降序合并, 单位归一到元.
@@ -158,18 +189,27 @@ def search_judicial(
 
     Args:
         province / city / district: 地区中文名 (e.g. "广东" / "广州市" / "天河区"). 同单源工具.
-        page: 页码 (两端各取 page=N. ali 10 条/页, jd 40 条/页, 合并池 ~50 条/页).
-        limit: 合并后返回前 N 条 (默认 20, 上限建议 50).
+        page: 页码 (两端各取 page=N. ali 10 条/页, jd 40 条/页, 合并池 = 50 条/页).
+        limit: 本页返回前 N 条 (默认 50 = 满池, 不丢数据).
+            ⚠️ limit 是**本页展示上限**, 不是分页窗口. 传 <50 时被截掉的标的
+            **不会**出现在 page+1 (两端各自按自己的页大小翻页), envelope 的 `dropped`
+            会告诉你截掉了多少. 要完整浏览就别动这个默认值.
 
     Returns:
         {
           count: int,                      # 实际返回 items 数 (≤ limit)
-          items: [{platform, id, title, price_yuan, raw}, ...],   # 价格降序
+          dropped: int,                    # 本页取回但因 limit 被截掉的条数 (这些不会进下一页)
+          items: [{platform, id, title, price_yuan, raw}, ...],   # 本页内价格降序
           ali_totalCount: int | None,      # 阿里端总数 (可分页)
           jd_count: int | None,            # 京东端本页 count
           sources: ["ali", "jd"],          # 成功调用的源 (若某端 error 此处不列)
+          area_applied?: {ali: bool, jd: bool},  # 传了地区参数时才有: 该源是否完整应用了它
           errors?: {ali?: {...}, jd?: {...}},    # 任一端失败的诊断信息
         }
+        地区两端都没生效: {error: "area_not_resolved", message, hint, items: []}
+
+    ⚠️ 跨页的价格序不是全局单调的 (两端页大小不同, page+1 的首条可能贵过 page 的末条).
+       「价格降序」的保证只在**单页内**成立.
     """
     page, limit = _clamp_page(page), _clamp_limit(limit)
     with cf.ThreadPoolExecutor(max_workers=2) as ex:
@@ -194,19 +234,53 @@ def search_judicial(
         for it in (jd_r.get("items") or []):
             items.append(_normalize_item("jd", it))
 
-    # 价格降序 (None 价格沉到末尾)
+    # ---------- 地区是否真的生效 ----------
+    # 两端对"解析不出来"的处理语义相反: 阿里返 area_not_resolved 错误, 京东 silent skip
+    # 后由上游返回**全国**数据. 不做下面这段判断的话, search_judicial(province="火星省")
+    # 会返回 {"count": 40, "sources": ["jd"]} + 40 条全国标的 —— 顶层看起来完全成功,
+    # agent 会直接把全国数据当成"火星省的拍卖"汇报, errors.ali 埋在信封尾部没人看。
+    area_applied: dict[str, bool] = {}
+    any_scoped = False
+    if province or city or district:
+        if "ali" in sources:
+            area_applied["ali"] = bool(ali_r.get("area_applied"))
+            any_scoped = any_scoped or bool(ali_r.get("area_scoped"))
+        if "jd" in sources:
+            area_applied["jd"] = bool(jd_r.get("area_applied"))
+            any_scoped = any_scoped or bool(jd_r.get("area_scoped"))
+        # 仅当**有成功的源**却没有任何一个把地区收窄过, 才判定地区彻底没生效.
+        # (两端都网络失败时 sources 为空, 那是网络问题不是地区问题, 不在此报错)
+        if sources and not any_scoped:
+            return {
+                "error": "area_not_resolved",
+                "message": f"地区参数两端均无法解析: province={province!r} "
+                           f"city={city!r} district={district!r}",
+                "hint": "用 ali_get_supported_areas / jd_get_supported_areas 查可用的中文名; "
+                        "不加地区参数即查全国",
+                "sources": sources,
+                "errors": errors or None,
+                "items": [],
+            }
+
+    # 价格降序 (None 价格沉到末尾). 注意: 只在本页内成立, 跨页不保证 —— 见 docstring.
     items.sort(key=lambda x: x["price_yuan"] if x["price_yuan"] is not None else -float("inf"),
                reverse=True)
+    fetched = len(items)
     items = items[:limit]
 
     out: dict[str, Any] = {
         "count": len(items),
+        # 本页从上游取回但被 limit 截掉的条数. 这些标的**不会**出现在 page+1,
+        # 因为两端各自按自己的页大小翻页, 合并层没有游标. 显式报出来, 不静默丢.
+        "dropped": fetched - len(items),
         "page":  page,
         "ali_totalCount": ali_r.get("totalCount"),
         "jd_count": jd_r.get("count"),
         "sources": sources,
         "items": items,
     }
+    if area_applied:
+        out["area_applied"] = area_applied
     if errors:
         out["errors"] = errors
     return out
@@ -246,7 +320,10 @@ def ali_search_judicial(
         fcat_v4_ids:    (高级) 分类编码列表, 见 ali_get_filter_options
 
     Returns:
-        正常: {count, page, totalCount, items, validated, [matched_district_code], [_district_fallback]}
+        正常: {count, page, totalCount, items, validated, area_scoped, area_applied,
+              [matched_district_code], [_district_fallback]}
+              `area_applied` = 是否完整满足了请求的层级 (传了 city 却只收窄到省 → False);
+              `area_scoped`  = 是否至少不是全国范围.
               每条 item 除原生字段外带 `price_yuan` (元) —— 原生 `currentPrice` 是**分**,
               跟京东同名字段差 100 倍, 读价格请一律用 price_yuan.
               `validated` = 本次是否真的跑过地区守门校验.
@@ -379,6 +456,16 @@ def _ali_search_impl(
     if matched_district: out["matched_district_code"] = matched_district
     if fallback_used:    out["_district_fallback"] = fallback_used
     if r.get("_token_refreshed"): out["_token_refreshed"] = True
+
+    # 地区实际收窄到哪一级. 阿里在**省**都解析不到时才报 area_not_resolved,
+    # 而 province="广东" + city="杭州市" 这类只会静默降级到省级 —— 调用方有权知道。
+    req = _requested_level(province, city, district)
+    if req:
+        applied_level = _code_level(location_codes[0] if location_codes else None)
+        if fallback_used == "title_filter":
+            applied_level = 3          # 客户端 title 过滤等效收窄到区县
+        out["area_scoped"]  = applied_level > 0      # 是否至少不是全国
+        out["area_applied"] = applied_level >= req   # 是否完整满足了请求的层级
     return out
 
 
@@ -434,8 +521,11 @@ def ali_get_supported_areas(province: str | None = None,
                     "真正查询请用 ali_search_judicial(province, city, district=中文名), "
                     "工具内置 pre-2013 编码自动解析阿里 server 真值, 不要把这里的 code 传给 search.",
         }
-    pn = province.rstrip("省市自治区")
-    p = next((x for x in GB2260 if pn in x["name"] or x["name"].startswith(pn)), None)
+    # 复用 ali_h5_client._pick 的三级精确优先匹配, **不要**在这里另写一份.
+    # 历史缺陷: 这里曾自己写 `cn in x["name"]` 的任意位置子串匹配, 于是
+    # "荆州市" 被 rstrip 剥成 "荆" 后命中 "荆门市", 查荆州列出的是荆门的区县;
+    # "定州市" 剥成 "定" 命中 "保定市". 同一份匹配逻辑两处实现是这条缺陷能活下来的直接原因.
+    p = _pick(GB2260, province, _SFX_PROV)
     if not p: return {"error": f"未找到省份 {province!r}"}
     if not city:
         return {
@@ -445,8 +535,7 @@ def ali_get_supported_areas(province: str | None = None,
             "cities": [{"name": c["name"], "code": (c["code"]+"0000")[:6]}
                        for c in p.get("children", [])],
         }
-    cn = city.rstrip("市地区州盟")
-    c = next((x for x in p.get("children",[]) if cn in x["name"] or x["name"].startswith(cn)), None)
+    c = _pick(p.get("children", []), city, _SFX_CITY)
     if not c: return {"error": f"在 {p['name']} 找不到 {city!r}"}
     return {
         "province": p["name"], "city": c["name"],
@@ -489,8 +578,10 @@ def jd_search_judicial(
         page: 页码 (40 条/页).
 
     Returns:
-        {count, page, items: [...]}
-        每条 item: paimaiId / title / currentPriceCN / discountRate / displayStatus 等
+        {count, page, items: [...], area_scoped, area_applied}
+        地区层级未被应用时 area_applied=False —— silent skip 不再是静默的.
+        每条 item: paimaiId / title / price_yuan / currentPriceCN / discountRate / displayStatus 等
+        读价格一律用 `price_yuan` (元) —— 与阿里单源工具字段名/单位一致.
 
     解析行为: 中文名模糊匹配 JD 内置地区树, 匹配不上的层级 silent skip
     (不会乱传错码触发 server 静默 fallback 到全国).
@@ -509,11 +600,17 @@ def jd_search_judicial(
     items = []
     for it in raw_items:
         inner = it.get("data") or it
+        # 价格单位归一. 京东原生 currentPrice 本来就是**元**, 不需要换算, 但仍必须输出
+        # price_yuan —— 否则 "所有工具都有 price_yuan, 读价格一律用它" 这条对 agent 的
+        # 约定在单源工具上失效, agent 会退回去直接读 currentPrice, 而那个字段与阿里同名
+        # 不同单位 (阿里是分), 正是要根除的心智负担.
+        cp = inner.get("currentPrice")
         items.append({
             "paimaiId":      inner.get("paimaiId"),
             "skuId":         inner.get("skuId"),
             "title":         inner.get("title"),
-            "currentPrice":  inner.get("currentPrice"),
+            "currentPrice":  cp,
+            "price_yuan":    float(cp) if isinstance(cp, (int, float)) else None,
             "currentPriceCN": inner.get("currentPriceCN"),
             "startPrice":    inner.get("startPrice"),
             "creditCapitalCN": inner.get("creditCapitalCN"),
@@ -530,11 +627,30 @@ def jd_search_judicial(
             "productImage":  inner.get("productImage"),
             "houseAttributes": inner.get("houseAttributes"),
         })
-    return {
+    out: dict[str, Any] = {
         "count":   len(items),
         "page":    page,
         "items":   items,
     }
+    # 地区实际收窄到哪一级. 京东的 silent skip 本身是对的 (乱传错码会让 server 静默
+    # fallback 到全国), 但它必须**把 skip 这件事回报给调用方** —— 否则
+    # jd_search_judicial(province="火星省") 返回的 40 条全国标的看起来和成功查询一模一样。
+    req = _requested_level(province, city, district)
+    if req:
+        p = jd._resolve_area(province, city, district)
+        applied_level = (3 if p.get("multiCountyIds") else
+                         2 if p.get("multiCityIds") else
+                         1 if p.get("multiProvinceIds") else 0)
+        if p.get("multiProvinceNames") in JD_MUNICIPALITIES:
+            # 直辖市只有 省 → 区 两层: cities 那一层其实就是区县;
+            # 而 city="上海市" 与 province="上海" 是同一级, 省级命中即已满足 city.
+            if applied_level == 2:
+                applied_level = 3
+            elif applied_level == 1 and req == 2:
+                applied_level = 2
+        out["area_scoped"]  = applied_level > 0
+        out["area_applied"] = applied_level >= req
+    return out
 
 
 @mcp.tool()
@@ -558,9 +674,9 @@ def jd_get_supported_areas(province: str | None = None,
             "provinces": list(JD_AREAS.keys()),
             "note": "支持模糊匹配 (e.g. '广东'='广东省'); 查市传 province, 查区县再传 city.",
         }
-    # 模糊匹配 province
-    from jd_h5_client import _match_name
-    pm = _match_name(province, JD_AREAS)
+    # 模糊匹配 province. 后缀集合必须按层级传, 否则区县级会把 "定州市" 剥成 "定".
+    from jd_h5_client import _match_name, _SFX_PROV as _JD_SFX_PROV, _SFX_CITY as _JD_SFX_CITY
+    pm = _match_name(province, JD_AREAS, _JD_SFX_PROV)
     if not pm: return {"error": f"未找到省份 {province!r}"}
     prov_name, prov = pm
     if not city:
@@ -569,7 +685,7 @@ def jd_get_supported_areas(province: str | None = None,
             "city_count": len(prov["cities"]),
             "cities": list(prov["cities"].keys()),
         }
-    cm = _match_name(city, prov["cities"])
+    cm = _match_name(city, prov["cities"], _JD_SFX_CITY)
     if not cm: return {"error": f"在 {prov_name} 找不到 {city!r}"}
     city_name, c = cm
     return {

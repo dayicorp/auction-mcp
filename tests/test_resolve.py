@@ -214,3 +214,151 @@ def test_scope_prefix_handles_empty():
     from ali_h5_client import scope_prefix
     assert scope_prefix(None) is None
     assert scope_prefix("") is None
+
+
+# ==================== 回归: 第二轮审计 A — 京东端区县名静默串区 ====================
+#
+# 根因与第一轮 P0-3 (荆州→荆门) 完全相同, 但活在京东侧: str.rstrip 吃的是**字符集合**,
+# 京东原本用一个大集合 "省市区县旗自治区盟自治州" 通吃三级, 把 "定州市" 剥成 "定";
+# 再加上四个匹配条件挤在同一遍循环里 (含任意位置子串 `q in ks`), 迭代顺序就决定了结果。
+# 修法: 三遍独立循环 (精确 → 去后缀后精确 → 前缀) + 后缀集合按层级拆分, 区县级不含 '州'。
+
+@pytest.mark.parametrize("province,city,district,expected", [
+    ("河北", "保定市",   "定州",   "定州市"),      # 曾串到 定兴县
+    ("河北", "唐山市",   "滦州",   "滦州市"),      # 曾串到 滦南县
+    ("山西", "长治市",   "潞州",   "潞州区"),      # 曾串到 潞城区
+    ("河南", "新乡市",   "辉县",   "辉县市"),      # 曾串到 卫辉市
+    ("江苏", "连云港市", "海州",   "海州区"),      # 曾串到 东海县
+    ("山东", "烟台市",   "莱州",   "莱州市"),      # 曾串到 莱阳市
+    ("安徽", "阜阳市",   "颍州",   "颍州区"),      # 曾串到 颍上县
+    ("湖北", "襄阳市",   "襄州",   "襄州区"),      # 曾串到 襄城区
+    ("湖北", "黄冈市",   "黄州",   "黄州区"),      # 曾串到 黄梅县
+    ("江西", "吉安市",   "吉州",   "吉州区"),      # 曾串到 吉安县
+    ("陕西", "渭南市",   "华州",   "华州区"),      # 曾串到 华阴市
+    ("甘肃", "天水市",   "秦州",   "秦州区"),      # 曾串到 秦安县
+    ("甘肃", "酒泉市",   "肃州",   "肃州区"),      # 曾串到 肃北蒙古族自治县
+    ("黑龙江", "伊春市", "汤旺",   "汤旺县"),      # 曾串到 汤旺河区
+    ("内蒙古", "通辽市", "科尔沁", "科尔沁区"),    # 曾串到 科尔沁左翼中旗
+    ("四川", "成都市",   "高新",   "高新区"),      # 曾串到 高新西区
+])
+def test_jd_natural_short_district_name_not_confused_with_sibling(
+        province, city, district, expected):
+    """区县的**自然口语简称** (去掉末尾一个后缀字) 不得串到兄弟行政区.
+
+    '辉县' / '黄州' / '海州' 都是这些地方的标准口语名 —— agent 从用户的
+    '查一下辉县的法拍房' 里抽出来的就是 '辉县', 不是 '辉县市'。
+    京东端没有任何守门 (validate_location_scoped 是阿里专用), 且这里发出的是一个
+    **合法的** countyId, 守门就算搬过来也拦不住 —— 唯一的防线就是匹配本身要对。
+    """
+    params = JDH5Client()._resolve_area(province, city, district)
+    assert params.get("multiCountyNames") == expected
+
+
+def _natural_short(name: str, sfx: str = "省市区县旗盟") -> str:
+    """人类会打的简称: 只去掉末尾一个后缀字 (定州市→定州, 吴江区→吴江)."""
+    return name[:-1] if len(name) > 2 and name[-1] in sfx else name
+
+
+# 短名与兄弟行政区**真正同名**的, 无解, 不算缺陷 (如 临夏市/临夏县 简称都是 '临夏').
+_JD_INHERENTLY_AMBIGUOUS = {
+    ("甘肃", "临夏州",    "临夏市"),
+    ("新疆", "和田地区",  "和田县"),
+    ("新疆", "伊犁州",    "伊宁县"),
+    ("台湾", "中国台湾",  "新竹市"),
+    ("台湾", "中国台湾",  "嘉义市"),
+}
+
+
+def test_jd_full_dataset_natural_short_name_roundtrip():
+    """全量往返: 5344 个区县逐个用自然简称查, 必须解析回自己.
+
+    阿里侧早有 test_resolve_ali_full_dataset_roundtrip_is_lossless, 京东侧一直没有 ——
+    原有的 4 个手写用例全传**全名**, 走的是 `query in candidates` 那条精确分支,
+    永远碰不到下面的模糊循环, 于是 24 处串区一直没被发现。这条补上那个覆盖盲区。
+    """
+    bad = []
+    for pname, p in JD_AREAS.items():
+        for cname, c in p["cities"].items():
+            for dname in c["counties"]:
+                q = _natural_short(dname)
+                if q == dname:
+                    continue
+                if (pname, cname, dname) in _JD_INHERENTLY_AMBIGUOUS:
+                    continue
+                m = _match_name(q, c["counties"], "区县市旗")
+                got = m[0] if m else None
+                if got != dname:
+                    bad.append((pname, cname, dname, q, got))
+    assert bad == [], f"{len(bad)} 处简称串区, 前 10: {bad[:10]}"
+
+
+def test_jd_full_name_roundtrip_still_lossless():
+    """全名查询仍必须逐级解析回自己 (防三级匹配改动把精确路径改坏)."""
+    bad = []
+    for pname, p in JD_AREAS.items():
+        for cname, c in p["cities"].items():
+            if (_match_name(cname, p["cities"], "市地区州盟自治州") or (None,))[0] != cname:
+                bad.append((pname, cname))
+            for dname in c["counties"]:
+                if (_match_name(dname, c["counties"], "区县市旗") or (None,))[0] != dname:
+                    bad.append((pname, cname, dname))
+    assert bad == [], f"{len(bad)} 处全名往返误解析, 前 10: {bad[:10]}"
+
+
+# ==================== 回归: 第二轮审计 B — ali_get_supported_areas 重复匹配 ====================
+
+def test_ali_supported_areas_jingzhou_is_not_jingmen():
+    """第一轮 P0-3 只修了 ali_h5_client._pick, server 这个展示工具自己另写了一份
+    `cn in x["name"]` 的**任意位置子串**匹配, 荆州→荆门原样复现过。
+
+    这是给 agent 查'有哪些区县可选'的发现型工具 —— 查荆州拿到荆门的区县名单,
+    后面整条查询链路再干净也已经错了, 且错在一个不会报错的地方。
+    """
+    import server
+    out = server.ali_get_supported_areas("湖北", "荆州市")
+    assert out.get("city") == "荆州市", out
+    assert out.get("code") == "421000", out
+    names = [d["name"] for d in out.get("districts", [])]
+    assert "沙市区" in names and "荆州区" in names
+    assert "东宝区" not in names and "掇刀区" not in names   # 荆门的区
+
+
+def test_ali_supported_areas_full_city_roundtrip():
+    """全量往返: 342 个地级市逐个用自己的名字查, 必须返回自己."""
+    import server
+    from ali_h5_client import GB2260
+    bad = []
+    for p in GB2260:
+        if server.ali_get_supported_areas(p["name"]).get("province") != p["name"]:
+            bad.append((p["name"],))
+        for c in p.get("children", []):
+            if server.ali_get_supported_areas(p["name"], c["name"]).get("city") != c["name"]:
+                bad.append((p["name"], c["name"]))
+    assert bad == [], f"{len(bad)} 处误解析: {bad[:10]}"
+
+
+# ==================== 回归: 京东直辖市是 省→区 两层 ====================
+
+@pytest.mark.parametrize("province,city,district,expected", [
+    ("上海", "上海市", "浦东新区", "浦东新区"),
+    ("北京", "北京市", "朝阳区",   "朝阳区"),
+    ("重庆", "重庆市", "渝北区",   "渝北区"),
+    ("天津", "天津市", "和平区",   "和平区"),
+])
+def test_jd_municipality_district_is_resolved(province, city, district, expected):
+    """京东的直辖市树是 省 → **区**, 没有"市"这一级.
+
+    不特殊处理的话 "上海市" 匹配不到任何候选, district 连试都不会试一次 ——
+    查"上海市浦东新区"会静默返回**全上海** (实测混进黄浦区的标的)。
+    这是阿里侧 _municipality_district (第一轮 P0-12) 在京东侧的同类缺口。
+    """
+    params = JDH5Client()._resolve_area(province, city, district)
+    # 直辖市下, 京东的 cities 那一层承载的就是区县
+    assert params.get("multiCityNames") == expected, params
+
+
+def test_jd_municipality_without_district_still_province_only():
+    """只给直辖市省名时不该凭空收窄到某个区."""
+    params = JDH5Client()._resolve_area("上海")
+    assert params.get("multiProvinceNames") == "上海"
+    assert "multiCityIds" not in params

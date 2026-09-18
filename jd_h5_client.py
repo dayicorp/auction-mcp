@@ -46,16 +46,41 @@ def _build_lookup(tree: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 JD_AREAS: dict[str, dict[str, Any]] = _build_lookup(_AREAS_TREE)
 
 
-def _match_name(query: str | None, candidates: dict[str, Any]) -> tuple[str, Any] | None:
-    """模糊匹配中文名: 精确 → 前缀 → 包含. 去尾缀 '省/市/区/县/旗' 后再试."""
+# 行政区划后缀, **按层级分开**. 与 ali_h5_client 的 _SFX_* 保持一致.
+#
+# 注意 str.rstrip 吃的是**字符集合**而非后缀串: 用一个大集合通吃三级时,
+# "定州市" 会被连剥 市/州 只剩 "定", "辉县市" 剩 "辉" —— 再配上无序子串匹配就会
+# 串到兄弟行政区去 (实测 海州→东海县 / 定州→定兴县 / 黄州→黄梅县).
+# 区县级的集合**刻意不含 '州'**, 这样 "定州市"/"海州区" 只剥到 "定州"/"海州", 天然唯一.
+_SFX_PROV = "省市自治区"
+_SFX_CITY = "市地区州盟自治州"
+_SFX_DIST = "区县市旗"
+
+# 直辖市. 京东地区树对这 4 个是 省 → 区 两层 (没有"市"这一级), 与其他省份的
+# 省 → 市 → 区县 三层不同, 解析和层级判定都要特殊处理.
+MUNICIPALITIES = frozenset({"北京", "上海", "天津", "重庆"})
+
+
+def _match_name(query: str | None, candidates: dict[str, Any],
+                suffixes: str = _SFX_DIST) -> tuple[str, Any] | None:
+    """按 精确 → 去后缀后精确 → 前缀 三级匹配中文名. **不做无序子串匹配**.
+
+    三遍独立循环而非一遍内 or 掉四个条件: 强条件必须全局优先, 否则只满足最弱条件的
+    候选只要排在前面就会压过后面本该精确命中的那个 —— 这正是京东端 24 个区县静默串区的根因.
+
+    suffixes 按层级传 (_SFX_PROV / _SFX_CITY / _SFX_DIST), 默认区县级.
+    """
     if not query:
         return None
-    if query in candidates:
+    if query in candidates:                                   # 1. 精确
         return query, candidates[query]
-    q = query.rstrip("省市区县旗自治区盟自治州")
-    for k, v in candidates.items():
-        ks = k.rstrip("省市区县旗自治区盟自治州")
-        if k.startswith(query) or ks == q or ks.startswith(q) or q in ks:
+    q = query.rstrip(suffixes)
+    if q:
+        for k, v in candidates.items():                       # 2. 去后缀后精确
+            if k.rstrip(suffixes) == q:
+                return k, v
+    for k, v in candidates.items():                           # 3. 前缀 (模糊兜底)
+        if k.startswith(query) or (q and k.startswith(q)):
             return k, v
     return None
 
@@ -87,7 +112,7 @@ class JDH5Client:
         out: dict[str, Any] = {}
         if not province:
             return out
-        m = _match_name(province, JD_AREAS)
+        m = _match_name(province, JD_AREAS, _SFX_PROV)
         if not m:
             return out
         prov_name, prov = m
@@ -96,8 +121,19 @@ class JDH5Client:
         out["multiProvinceNames"] = prov_name
         if not city:
             return out
-        cm = _match_name(city, prov["cities"])
+        cm = _match_name(city, prov["cities"], _SFX_CITY)
         if not cm:
+            # 直辖市: 京东的树是 省 → **区**, 根本没有"市"这一级, 所以 "上海市" 匹配不到
+            # 任何候选。不特殊处理的话 district 连试都不会试一次, 查"上海市浦东新区"
+            # 会静默返回**全上海** (实测混进黄浦区的标的)。用户给的 district 其实就挂在这一层。
+            if district and prov_name in MUNICIPALITIES:
+                dm2 = _match_name(district, prov["cities"], _SFX_DIST)
+                if dm2:
+                    d_name, d = dm2
+                    out["positionCityId"]    = d["id"]
+                    out["multiCityIds"]      = d["id"]
+                    out["positionCityNames"] = d_name
+                    out["multiCityNames"]    = d_name
             return out
         city_name, c = cm
         out["positionCityId"]   = c["id"]
@@ -106,7 +142,7 @@ class JDH5Client:
         out["multiCityNames"]   = city_name
         if not district:
             return out
-        dm = _match_name(district, c["counties"])
+        dm = _match_name(district, c["counties"], _SFX_DIST)
         if not dm:
             return out
         county_name, county_id = dm

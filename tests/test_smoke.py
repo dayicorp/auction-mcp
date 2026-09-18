@@ -287,3 +287,118 @@ def test_learn_district_code_negative_result_is_cached(smoke_server, monkeypatch
     second = server.ali.learn_district_code_from_city("330600", "不存在区")
     assert second is None
     assert sent == [], f"第二次应命中负缓存, 实际又打了 {len(sent)} 次上游"
+
+
+# ============================================================ 回归: 第二轮审计 E
+
+def test_jd_single_source_exposes_price_yuan(smoke_server):
+    """单源京东结果也必须带 price_yuan.
+
+    第一轮 P1-13 只给阿里单源补了 price_yuan, 京东单源漏了, 但 README 和 server
+    instructions 都是无条件表述 ("所有工具都额外输出 price_yuan, 读价格一律用它")。
+    缺这个字段的后果不是读成 100 倍, 而是 agent 退回去直接读 currentPrice ——
+    而"把两端同名字段等同看待"的心智正是 P1-13 想根除的。
+    """
+    server, _ = smoke_server
+    r = server.jd_search_judicial(province="广东", city="广州市")
+    top = r["items"][0]
+    assert "price_yuan" in top, f"京东单源 item 缺 price_yuan: {sorted(top)}"
+    # 京东原生就是元, 不换算, 但字段名/单位必须与阿里单源一致
+    assert top["price_yuan"] == pytest.approx(top["currentPrice"])
+
+
+def test_both_single_source_tools_agree_on_price_field(smoke_server):
+    """两个单源工具的价格字段契约一致: 都有 price_yuan, 且都是元."""
+    server, _ = smoke_server
+    a = server.ali_search_judicial(province="广东", city="广州市")["items"][0]
+    j = server.jd_search_judicial(province="广东", city="广州市")["items"][0]
+    for item, name in ((a, "ali"), (j, "jd")):
+        assert item.get("price_yuan") is not None, f"{name} 缺 price_yuan"
+        assert isinstance(item["price_yuan"], float), f"{name} price_yuan 不是 float"
+
+
+# ============================================================ 回归: 第二轮审计 C — 翻页丢标的
+
+def test_limit_default_is_full_pool_and_drops_nothing(smoke_server):
+    """默认 limit 必须等于满池 (MAX_LIMIT), 单页不丢数据.
+
+    历史行为: 默认 limit=20 而合并池是 50, page=1 静默丢弃 30 条, 且这 30 条
+    **不会**出现在 page=2 (两端各自按自己的页大小翻页, 合并层没有游标) ——
+    实测 page1 丢弃集合 ∩ page2 = 0 条, 默认参数下用户永久看不到 60% 的标的。
+    """
+    server, _ = smoke_server
+    assert server.search_judicial.__defaults__[-1] == server.MAX_LIMIT
+    r = server.search_judicial(province="广东")
+    assert r["dropped"] == 0, f"默认参数不该丢数据, 实际丢了 {r['dropped']} 条"
+    assert r["count"] == len(r["items"])
+
+
+def test_truncation_is_reported_not_silent(smoke_server):
+    """limit 截断必须在 envelope 里显式报出条数, 不能静默."""
+    server, _ = smoke_server
+    full = server.search_judicial(province="广东")
+    cut  = server.search_judicial(province="广东", limit=2)
+    assert cut["count"] == 2
+    assert cut["dropped"] == full["count"] - 2
+    assert cut["dropped"] > 0, "构造的池子太小, 这条测试没测到截断"
+
+
+# ============================================================ 回归: 第二轮审计 D — 地区静默失效
+
+def test_unresolvable_province_does_not_return_nationwide_data(smoke_server):
+    """省名拼错时不得返回全国数据冒充该省.
+
+    历史行为: 阿里返 area_not_resolved, 京东 silent skip 后上游给**全国**数据,
+    合并层把它当成"一端降级"处理 → envelope 顶层是 {"count": 40, "sources": ["jd"]},
+    三条真实标的, 看起来完全成功。agent 会直接把全国数据当成"火星省的拍卖"汇报,
+    errors.ali 埋在信封尾部没人看。
+    """
+    server, _ = smoke_server
+    r = server.search_judicial(province="火星省")
+    assert r.get("error") == "area_not_resolved", r
+    assert r["items"] == [], "地区彻底没生效时不得返回任何 items"
+    assert "hint" in r
+
+
+def test_district_without_city_errors_instead_of_nationwide(smoke_server):
+    """只传 district 不传 city: 阿里报错 + 京东 silent skip 到全国 → 整体必须报错."""
+    server, _ = smoke_server
+    r = server.search_judicial(district="福田区")
+    assert r.get("error") == "area_not_resolved", r
+    assert r["items"] == []
+
+
+def test_area_applied_flags_partial_scope(smoke_server):
+    """省份对但城市名对不上 → 不报错 (省级仍生效), 但必须标出 city 没被应用."""
+    server, _ = smoke_server
+    r = server.search_judicial(province="广东", city="杭州市")
+    assert "error" not in r, "省级已生效, 不该整体报错"
+    assert r["area_applied"] == {"ali": False, "jd": False}, r.get("area_applied")
+    assert r["count"] > 0
+
+
+def test_area_applied_true_on_clean_query(smoke_server):
+    """正常的省级查询两端都应标 True."""
+    server, _ = smoke_server
+    r = server.search_judicial(province="广东")
+    assert r["area_applied"] == {"ali": True, "jd": True}, r.get("area_applied")
+
+
+def test_no_area_params_has_no_area_applied_field(smoke_server):
+    """没传地区参数时 area_applied 无意义, 不应出现在 envelope 里."""
+    server, _ = smoke_server
+    r = server.search_judicial()
+    assert "area_applied" not in r
+    assert "error" not in r
+
+
+def test_network_failure_is_not_reported_as_area_error(smoke_server, monkeypatch):
+    """两端都网络失败时是网络问题, 不得误报成 area_not_resolved."""
+    server, _ = smoke_server
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(server.ali, "search_judicial", boom)
+    monkeypatch.setattr(server.jd,  "search_judicial", boom)
+    r = server.search_judicial(province="广东")
+    assert r.get("error") != "area_not_resolved", r
+    assert set(r.get("errors", {})) == {"ali", "jd"}
