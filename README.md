@@ -6,7 +6,7 @@
 ![Tests](https://img.shields.io/badge/tests-102%20offline%20%2B%2019%20live-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
 
-> 最后巡检：2026-10-08 · 离线测试 102/102 通过
+> 最后巡检：2026-10-09 · 离线测试 102/102 通过
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
 
