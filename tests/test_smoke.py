@@ -207,6 +207,7 @@ async def test_mcp_protocol_handshake_and_zero_network_tools():
             assert set(names) == {
                 "search_judicial", "ali_search_judicial", "ali_get_filter_options",
                 "ali_get_supported_areas", "jd_search_judicial", "jd_get_supported_areas",
+                "get_judicial_detail",
             }
             res = await session.call_tool("jd_get_supported_areas",
                                           {"province": "江苏", "city": "苏州市"})
@@ -402,3 +403,70 @@ def test_network_failure_is_not_reported_as_area_error(smoke_server, monkeypatch
     r = server.search_judicial(province="广东")
     assert r.get("error") != "area_not_resolved", r
     assert set(r.get("errors", {})) == {"ali", "jd"}
+
+
+def test_ali_title_html_unescape_and_stage_label():
+    """阿里返回的标题含 &ldquo; 等 HTML 实体时自动反转义, 且 circ 枚举翻译为 stage_label."""
+    import server
+    raw = {"data": {"data": {"scenes": [{"schemeList": [{"totalCount": 1, "page": 1, "pageSize": 10,
+           "contentList": [{"itemId": 1001, "currentPrice": 800000000, "circ": 4,
+                            "extraMap": {"title": "（破）&ldquo;景豪坊&rdquo;西区项目", "locationCode": "440104"}}]}]}]}}}
+    items, _ = server._extract_items(raw)
+    assert items[0]["title"] == "（破）“景豪坊”西区项目"
+    assert items[0]["stage_label"] == "变卖"
+
+
+def test_jd_house_attributes_promoted_and_bankrupt_channel_deduped(smoke_server, monkeypatch):
+    """京东搜索应把 houseAttributes 提升到 item 顶层, include_bankrupt=True 合并去重."""
+    server, _ = smoke_server
+
+    def fake_search(page=1, province=None, city=None, district=None, channel="judicial"):
+        if channel == "bankrupt":
+            return {"code": 0, "data": {"resultData": [
+                {"data": {"paimaiId": 900, "title": "重复标的", "currentPrice": 50_000_000.0, "displayStatus": 1}},
+                {"data": {"paimaiId": 999, "title": "破产重整工业地", "currentPrice": 88_000_000.0, "displayStatus": 1}},
+            ]}}
+        return {"code": 0, "data": {"resultData": [
+            {"data": {"paimaiId": 900, "title": "&ldquo;花园&rdquo;住宅", "currentPrice": 50_000_000.0,
+                      "displayStatus": 1,
+                      "houseAttributes": {"houseArea": 180.5, "housePurpose": "住宅",
+                                          "houseLease": 3, "houseEmpty": 1}}},
+        ]}}
+
+    monkeypatch.setattr(server.jd, "search_judicial", fake_search)
+    r = server.jd_search_judicial(province="广东", city="广州市", include_bankrupt=True)
+    assert r["count"] == 2
+    assert r["items"][0]["paimaiId"] == 999
+    assert r["items"][1]["title"] == "“花园”住宅"
+    assert r["items"][1]["building_area_sqm"] == 180.5
+    assert r["items"][1]["lease_state"] == "无人申报租赁，须自行核实"
+    assert r["items"][1]["empty_state"] == "法院标注：已腾空"
+
+
+def test_get_judicial_detail_jd_and_ali(monkeypatch):
+    """get_judicial_detail 匿名查询京东与阿里单品详情及结拍结局."""
+    import server
+
+    def fake_jd_api(fid, body, appid="paimai"):
+        if fid == "getProductBasicInfo":
+            return {"data": {"title": "测试工业厂房", "assessmentPrice": 100000000.0,
+                             "startPrice": 70000000.0, "ensurePrice": 7000000.0,
+                             "priceLowerOffset": 500000.0, "auctionPrefix": "二拍",
+                             "displayStatus": 2, "uploadOrganization": "苏州市中级人民法院",
+                             "productAddressResult": {"address": "高新区松花江路"}}}
+        if fid == "getPaimaiRealTimeData":
+            return {"data": {"currentPrice": 85000000.0, "bidCount": 12, "auctionStatus": 2}}
+        if fid == "queryProductDescription":
+            return {"data": "<p>建筑面积 50000平方米</p>"}
+        if fid == "queryAttachFilesForIntro":
+            return {"data": [{"attachmentName": "评估报告.pdf", "attachmentAddress": "https://storage.jd.com/a.pdf"}]}
+        return {}
+
+    monkeypatch.setattr(server.jd, "call_api", fake_jd_api)
+    d_jd = server.get_judicial_detail("jd", "jd:12345")
+    assert d_jd["outcome"] == "成交"
+    assert d_jd["bid_count"] == 12
+    assert d_jd["price_yuan"] == 85000000.0
+    assert d_jd["discount_rate"] == "70.0%"
+    assert len(d_jd["attachments"]) == 1
+

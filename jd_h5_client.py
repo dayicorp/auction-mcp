@@ -160,18 +160,22 @@ class JDH5Client:
 
     def search_judicial(self, page: int = 1, province: str | None = None,
                         city: str | None = None,
-                        district: str | None = None) -> dict[str, Any]:
-        """京东司法拍卖搜索. 固定 价格降序 + 仅进行中/即将开始.
+                        district: str | None = None,
+                        channel: str = "judicial") -> dict[str, Any]:
+        """京东司法拍卖 / 破产强清搜索. 固定 价格降序 + 仅进行中/即将开始.
 
         Args:
             page: 页码 (40 条/页)
             province: 省份中文名 (e.g. "广东"). 全 33 省支持.
             city: 城市中文名 (e.g. "广州市"). 必须配 province.
             district: 区/县中文名 (e.g. "吴江区"). 必须配 city. 5344 个区县全覆盖.
+            channel: "judicial" (默认, 司法拍卖 reqSource=1) 或 "bankrupt" (破产强清 reqSource=2).
         """
+        is_bankrupt = (channel == "bankrupt")
+        app_code = "bankrup_search_home" if is_bankrupt else "judicature_search_home"
         search_params: dict[str, Any] = {
-            "reqSource": 1,
-            "appletsCode": "judicature_search_home",
+            "reqSource": 2 if is_bankrupt else 1,
+            "appletsCode": app_code,
             "sortField": self.DEFAULT_SORT,
             "multiStatus": self.DEFAULT_STATUS,
         }
@@ -180,7 +184,7 @@ class JDH5Client:
         biz_body = {
             "page": page,
             "tabParam": "all",
-            "pageParam": "judicature_search_home",
+            "pageParam": app_code,
             "isWaterfallInit": False,
             "searchParamsObj": search_params,
             "callbackParam": {},
@@ -209,3 +213,17 @@ class JDH5Client:
                 "_status": r.status_code,
                 "_raw_preview": (r.text or "")[:200],
             }
+
+    def call_api(self, function_id: str, body: dict[str, Any],
+                 appid: str = "paimai") -> dict[str, Any]:
+        """调用京东拍卖公开 GET 接口 (无需登录、无需签名)."""
+        params = {
+            "appid": appid,
+            "functionId": function_id,
+            "body": json.dumps(body, separators=(",", ":"), ensure_ascii=False),
+        }
+        r = self.s.get(API, params=params)
+        try:
+            return r.json()
+        except (ValueError, json.JSONDecodeError):
+            return {"_err": "LOCAL_NON_JSON", "_status": r.status_code}

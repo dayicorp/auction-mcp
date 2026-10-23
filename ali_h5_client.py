@@ -340,6 +340,7 @@ class AliH5Client:
                         circs: list[str] | None = None,          # 拍卖轮次
                         tag_ids: list[str] | None = None,        # 特性标签
                         zc_biz_types: list[str] | None = None,   # 资产类型
+                        keyword: str | None = None,              # 关键词搜索
                         prov: str = "", city: str = "", location_code: str = "",
                         ) -> dict[str, Any]:
         """司法拍卖列表 — 完整 filter 支持.
@@ -348,6 +349,7 @@ class AliH5Client:
         - status_orders: 拍卖状态. 默认 ["0", "1"] 进行中+即将开始
         - fcat_v4_ids: 分类编码列表 (e.g. ["206060601"] 住宅)
         - location_codes: 区县编码列表
+        - keyword: 关键词搜索
         """
         # apply defaults
         if sort is None: sort = self.DEFAULT_SORT
@@ -362,6 +364,7 @@ class AliH5Client:
         if circs:           filters["circs"]         = circs
         if tag_ids:         filters["tagIds"]        = tag_ids
         if zc_biz_types:    filters["zcBizTypes"]    = zc_biz_types
+        if keyword:         filters["keyword"]       = keyword
 
         filters_str = json.dumps(filters, separators=(",", ":"), ensure_ascii=False)
         df_variables = {

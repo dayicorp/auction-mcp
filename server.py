@@ -9,7 +9,7 @@ v2 设计原则:
 - 阿里 location 编码直接用国标 GB 2260 (前 2 省 + 中 2 市 + 末 2 区, server 自动展开 prefix).
 """
 from __future__ import annotations
-import concurrent.futures as cf, json, logging, os, sys, time
+import concurrent.futures as cf, html as htmlmod, json, logging, os, re, sys, time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -160,6 +160,74 @@ def _extra_facts(em: dict) -> dict:
     return {k: v for k, v in out.items() if v not in (None, "", 0)}
 
 
+_ALI_CIRC_LABELS = {
+    "1": "一拍",
+    "2": "二拍",
+    "4": "变卖",
+    "5": "重新拍卖",
+    "6": "再次拍卖",
+}
+
+_JD_HOUSE_ENUMS = {
+    "houseLease": {
+        "1": "有租赁",
+        "2": "无租赁",
+        "3": "无人申报租赁，须自行核实",
+    },
+    "houseKey": {
+        "1": "有钥匙",
+        "2": "无钥匙",
+        "3": "公告未披露",
+    },
+    "houseCertificate": {
+        "1": "有权证",
+        "3": "公告未披露",
+    },
+    "houseEmpty": {
+        "1": "法院标注：已腾空",
+        "2": "法院标注：未腾空",
+        "3": "腾空情况未披露",
+    },
+}
+
+
+def _clean_title(val: Any) -> str | None:
+    if val is None:
+        return None
+    return re.sub(r"\s+", " ", htmlmod.unescape(str(val))).strip()
+
+
+def _jd_house_facts(ha: dict | None) -> dict[str, Any]:
+    """提取京东搜索返回内嵌的 houseAttributes 硬事实 (零额外请求)."""
+    if not isinstance(ha, dict) or not ha:
+        return {}
+
+    def lab(key: str) -> str | None:
+        v = ha.get(key)
+        return _JD_HOUSE_ENUMS.get(key, {}).get(str(v)) if v is not None else None
+
+    area = ha.get("houseArea")
+    unit = None
+    m = re.match(r"([\d.]+)", str(ha.get("averagePrice") or ""))
+    if m:
+        try:
+            unit = float(m.group(1))
+        except ValueError:
+            unit = None
+    out = {
+        "building_area_sqm": float(area) if isinstance(area, (int, float)) else None,
+        "house_purpose": ha.get("housePurpose"),
+        "cell_name": ha.get("plotName"),
+        "consult_unit_price_yuan_per_sqm": unit,
+        "lease_state": lab("houseLease"),
+        "key_state": lab("houseKey"),
+        "cert_state": lab("houseCertificate"),
+        "empty_state": lab("houseEmpty"),
+        "decorate": ha.get("decorate"),
+    }
+    return {k: v for k, v in out.items() if v not in (None, "", 0)}
+
+
 def _extract_items(raw: dict) -> tuple[list[dict], dict]:
     """从 ali.search_judicial 原始响应抽 items + meta. 返回 (items, {totalCount, page, pageSize})."""
     scenes = (raw.get("data") or {}).get("data", {}).get("scenes") or []
@@ -170,9 +238,11 @@ def _extract_items(raw: dict) -> tuple[list[dict], dict]:
     items = []
     for it in cl:
         em = it.get("extraMap", {}) or {}
-        items.append({
+        circ_val = em.get("circ") or it.get("circ")
+        stage_label = _ALI_CIRC_LABELS.get(str(circ_val)) if circ_val is not None else None
+        row = {
             "itemId":      it.get("itemId") or em.get("itemId"),
-            "title":       em.get("title") or it.get("title"),
+            "title":       _clean_title(em.get("title") or it.get("title")),
             "currentPrice": it.get("currentPrice"),
             "displayInitialPrice": em.get("displayInitialPrice"),
             "displayInitialPriceUnit": em.get("displayInitialPriceUnit"),
@@ -184,12 +254,15 @@ def _extract_items(raw: dict) -> tuple[list[dict], dict]:
             "endTime":     em.get("endTime") or it.get("endTime"),
             "status":      em.get("status") or it.get("status"),
             "statusOrder": it.get("statusOrder"),
-            "circ":        em.get("circ") or it.get("circ"),
+            "circ":        circ_val,
             "bizType":     em.get("bizType") or it.get("bizType"),
             "headerPicUrls": em.get("headerPicUrls"),
             "subscribeCnt": em.get("subscribeCnt") or it.get("subscribeCnt"),
             **_extra_facts(em),
-        })
+        }
+        if stage_label:
+            row["stage_label"] = stage_label
+        items.append(row)
     meta = {"totalCount": sl.get("totalCount"), "page": sl.get("page"),
             "pageSize": sl.get("pageSize") or 10}
     return items, meta
@@ -598,6 +671,7 @@ def jd_search_judicial(
     city: str | None = None,
     district: str | None = None,
     page: int = 1,
+    include_bankrupt: bool = False,
 ) -> dict:
     """**[Advanced 单源]** 京东司法拍卖搜索. 默认情况下用 `search_judicial` 同时拿两端, 别单独调这个.
 
@@ -620,11 +694,13 @@ def jd_search_judicial(
         city: 城市中文名 (e.g. "广州市"). 必须配 province.
         district: 区/县中文名 (e.g. "吴江区"). 必须配 city.
         page: 页码 (40 条/页).
+        include_bankrupt: 是否同时合并京东破产强清频道 (bankrup_search_home, 按 paimaiId 去重).
 
     Returns:
         {count, page, items: [...], area_scoped, area_applied}
         地区层级未被应用时 area_applied=False —— silent skip 不再是静默的.
-        每条 item: paimaiId / title / price_yuan / currentPriceCN / discountRate / displayStatus 等
+        每条 item: paimaiId / title / price_yuan / currentPriceCN / discountRate / displayStatus 等,
+        并直接展开 houseAttributes 硬事实 (building_area_sqm / house_purpose / lease_state / empty_state 等).
         读价格一律用 `price_yuan` (元) —— 与阿里单源工具字段名/单位一致.
 
     解析行为: 中文名模糊匹配 JD 内置地区树, 匹配不上的层级 silent skip
@@ -640,19 +716,32 @@ def jd_search_judicial(
         return {"code": r.get("code"), "msg": r.get("msg"), "error": "JD getSearchData failed"}
 
     data = r.get("data") or {}
-    raw_items = data.get("resultData") or []
+    raw_items = list(data.get("resultData") or [])
+    if include_bankrupt:
+        try:
+            r_bk = jd.search_judicial(page=page, province=province, city=city,
+                                      district=district, channel="bankrupt")
+            if r_bk.get("code") == 0:
+                raw_items.extend(((r_bk.get("data") or {}).get("resultData") or []))
+        except Exception:
+            pass
+
     items = []
+    seen_pids: set[str] = set()
     for it in raw_items:
         inner = it.get("data") or it
-        # 价格单位归一. 京东原生 currentPrice 本来就是**元**, 不需要换算, 但仍必须输出
-        # price_yuan —— 否则 "所有工具都有 price_yuan, 读价格一律用它" 这条对 agent 的
-        # 约定在单源工具上失效, agent 会退回去直接读 currentPrice, 而那个字段与阿里同名
-        # 不同单位 (阿里是分), 正是要根除的心智负担.
+        pid = inner.get("paimaiId")
+        if pid is not None:
+            pid_key = str(pid)
+            if pid_key in seen_pids:
+                continue
+            seen_pids.add(pid_key)
         cp = inner.get("currentPrice")
-        items.append({
-            "paimaiId":      inner.get("paimaiId"),
+        ha = inner.get("houseAttributes")
+        row = {
+            "paimaiId":      pid,
             "skuId":         inner.get("skuId"),
-            "title":         inner.get("title"),
+            "title":         _clean_title(inner.get("title")),
             "currentPrice":  cp,
             "price_yuan":    float(cp) if isinstance(cp, (int, float)) else None,
             "currentPriceCN": inner.get("currentPriceCN"),
@@ -669,8 +758,13 @@ def jd_search_judicial(
             "endTime":       inner.get("endTime"),
             "remindCount":   inner.get("remindCount"),
             "productImage":  inner.get("productImage"),
-            "houseAttributes": inner.get("houseAttributes"),
-        })
+            "houseAttributes": ha,
+            **_jd_house_facts(ha),
+        }
+        items.append(row)
+    if include_bankrupt:
+        items.sort(key=lambda x: x["price_yuan"] if x["price_yuan"] is not None else -float("inf"),
+                   reverse=True)
     out: dict[str, Any] = {
         "count":   len(items),
         "page":    page,
@@ -738,6 +832,173 @@ def jd_get_supported_areas(province: str | None = None,
         "district_count": len(c["counties"]),
         "districts": list(c["counties"].keys()),
     }
+
+
+def _strip_html(raw: str | None) -> str:
+    if not raw:
+        return ""
+    s = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", str(raw), flags=re.S | re.I)
+    return re.sub(r"\s+", " ", htmlmod.unescape(re.sub(r"<[^>]+>", " ", s))).strip()
+
+
+@mcp.tool()
+def get_judicial_detail(
+    platform: str,
+    item_id: str,
+    keyword: str | None = None,
+) -> dict:
+    """查询单条司法/破产拍卖标的的详情、调查表/公告、附件直链与结拍结局 (全部匿名, 无需登录).
+
+    Args:
+        platform: "jd" (京东) 或 "ali" (阿里).
+        item_id: 标的 ID (京东 paimaiId 或 阿里 itemId, 也可传 "jd:311447360" / "ali:1093989716384").
+        keyword: (阿里可选) 标的标题关键词, 协助 H5 搜索网关零风控定位已结拍或特定单品.
+
+    Returns:
+        归一化的详情字典 (金额单位统一为人民币元):
+        - 京东: 评估价、起拍价、当前/成交价、折价率、保证金、加价幅度、拍次、处置单位、
+                出价次数 (bid_count)、结拍结局 (outcome: 在拍/预告中/成交/流拍/撤回/中止)、
+                调查情况表与公告摘录、附件 PDF 直链列表.
+        - 阿里: 实时状态、出价次数 (bid_count)、起拍价、当前/成交价、结拍结局与 extraMap 硬事实.
+    """
+    plat = (platform or "").strip().lower()
+    raw_id = str(item_id or "").strip()
+    if ":" in raw_id:
+        p_prefix, raw_id = raw_id.split(":", 1)
+        if not plat:
+            plat = p_prefix.lower()
+
+    if plat == "jd":
+        try:
+            pid = int(raw_id)
+        except ValueError:
+            return {"error": "invalid_item_id", "message": f"京东 paimaiId 必须为整数: {item_id!r}"}
+        try:
+            basic = jd.call_api("getProductBasicInfo", {"paimaiId": pid})
+            d = basic.get("data") if isinstance(basic.get("data"), dict) else None
+            if not d:
+                return {"error": "jd_detail_not_found", "paimaiId": pid, "raw": basic}
+
+            rt = jd.call_api("getPaimaiRealTimeData", {"paimaiId": pid}).get("data") or {}
+            desc_r = jd.call_api("queryProductDescription", {"paimaiId": pid, "source": 5})
+            desc_txt = _strip_html((desc_r.get("data") or {}).get("content")
+                                   if isinstance(desc_r.get("data"), dict) else desc_r.get("data"))
+            if not desc_txt:
+                nt_r = jd.call_api("queryNotice", {"paimaiId": pid})
+                desc_txt = _strip_html((nt_r.get("data") or {}).get("content")
+                                       if isinstance(nt_r.get("data"), dict) else nt_r.get("data"))
+
+            att_r = jd.call_api("queryAttachFilesForIntro", {"paimaiId": pid, "custom": 9})
+            files = att_r.get("data") or att_r.get("datas") or []
+            if isinstance(files, dict):
+                files = files.get("list") or files.get("attachList") or []
+            attachments = [
+                {"name": f.get("attachmentName") or "附件",
+                 "url": f.get("attachmentAddress") or f.get("completeAttachmentUrl"),
+                 "size": f.get("Size") or f.get("size")}
+                for f in (files if isinstance(files, list) else [])
+                if isinstance(f, dict) and (f.get("attachmentAddress") or f.get("completeAttachmentUrl"))
+            ]
+
+            assess = float(d["assessmentPrice"]) if isinstance(d.get("assessmentPrice"), (int, float)) and d["assessmentPrice"] > 0 else None
+            start = float(d["startPrice"]) if isinstance(d.get("startPrice"), (int, float)) and d["startPrice"] > 0 else None
+            cur_p = rt.get("currentPrice")
+            price_yuan = float(cur_p) if isinstance(cur_p, (int, float)) and cur_p > 0 else start
+            bid_count = int(rt.get("bidCount") or 0)
+            disp_st = d.get("displayStatus")
+            rt_st = rt.get("auctionStatus")
+            if str(disp_st) == "1" or str(rt_st) in ("0", "1"):
+                outcome = "在拍" if str(rt_st) == "1" else "预告中"
+            elif bid_count > 0:
+                outcome = "成交"
+            elif str(disp_st) in ("5", "6") or cur_p is None:
+                outcome = "撤回/中止"
+            else:
+                outcome = "流拍"
+
+            court = (d.get("uploadOrganization") or d.get("supervisionOrganization")
+                     or d.get("serviceOrganization"))
+            if not court and desc_txt:
+                m = re.search(r"([一-龥]{2,20}人民法院|[一-龥（）()]{4,30}管理人)", desc_txt)
+                if m:
+                    court = m.group(1)
+
+            return {
+                "platform": "jd",
+                "id": str(pid),
+                "title": _clean_title(d.get("title")),
+                "price_yuan": price_yuan,
+                "start_price_yuan": start,
+                "valuation_yuan": assess,
+                "discount_rate": f"{100.0 * start / assess:.1f}%" if (assess and start) else None,
+                "bail_yuan": float(d["ensurePrice"]) if isinstance(d.get("ensurePrice"), (int, float)) and d["ensurePrice"] > 0 else None,
+                "increment_yuan": float(d["priceLowerOffset"]) if isinstance(d.get("priceLowerOffset"), (int, float)) and d["priceLowerOffset"] > 0 else None,
+                "stage_label": d.get("auctionPrefix"),
+                "court": court,
+                "address": (d.get("productAddressResult") or {}).get("address"),
+                "bid_count": bid_count,
+                "outcome": outcome,
+                "description_excerpt": desc_txt[:2000] if desc_txt else None,
+                "attachments": attachments,
+                "url": f"https://auction.jd.com/{pid}.html",
+            }
+        except Exception as e:
+            return {"error": "jd_detail_exception", "exception": str(e), "exception_type": type(e).__name__}
+
+    if plat == "ali":
+        try:
+            kw = (keyword or raw_id).strip()
+            r = ali.search_judicial(page=1, sort="500", status_orders=["0", "1", "2", "4", "5"], keyword=kw)
+            scenes = ((r.get("data") or {}).get("data") or {}).get("scenes") or []
+            hit = None
+            if scenes:
+                for it in (scenes[0].get("schemeList") or [{}])[0].get("contentList") or []:
+                    em = it.get("extraMap") or {}
+                    iid = str(it.get("itemId") or em.get("itemId") or "")
+                    if iid == raw_id:
+                        hit = it
+                        break
+            if not hit:
+                return {
+                    "error": "ali_item_not_found_in_anonymous_search",
+                    "itemId": raw_id,
+                    "hint": "阿里匿名详情检索需传入准确的标的标题关键词 keyword",
+                }
+            em = hit.get("extraMap") or {}
+            so = hit.get("statusOrder")
+            bc = int(hit.get("bidCnt") or 0)
+            cp = (hit.get("currentPrice") / 100.0) if isinstance(hit.get("currentPrice"), (int, float)) else None
+            ip = (hit.get("initialPrice") / 100.0) if isinstance(hit.get("initialPrice"), (int, float)) else None
+            if so == 0:
+                outcome = "进行中"
+            elif so == 1:
+                outcome = "预告中"
+            elif bc > 0:
+                outcome = "成交"
+            elif so == 4:
+                outcome = "中止"
+            elif so == 5:
+                outcome = "撤回"
+            else:
+                outcome = "流拍"
+            circ_val = em.get("circ") or hit.get("circ")
+            return {
+                "platform": "ali",
+                "id": raw_id,
+                "title": _clean_title(em.get("title") or hit.get("title")),
+                "price_yuan": cp,
+                "start_price_yuan": ip,
+                "stage_label": _ALI_CIRC_LABELS.get(str(circ_val)) if circ_val is not None else None,
+                "court": em.get("shopName") or hit.get("shopName"),
+                "bid_count": bc,
+                "outcome": outcome,
+                "url": f"https://sf-item.taobao.com/sf_item/{raw_id}.htm",
+                **_extra_facts(em),
+            }
+        except Exception as e:
+            return {"error": "ali_detail_exception", "exception": str(e), "exception_type": type(e).__name__}
+
+    return {"error": "unsupported_platform", "message": f"platform 仅支持 'ali' 或 'jd': {platform!r}"}
 
 
 # ============================================================ entry
