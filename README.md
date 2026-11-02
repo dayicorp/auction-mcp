@@ -3,10 +3,8 @@
 ![MCP](https://img.shields.io/badge/MCP-server-7C3AED)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-102%20offline%20%2B%2019%20live-brightgreen)
+![Tests](https://img.shields.io/badge/tests-105%20offline%20%2B%2019%20live-brightgreen)
 ![Stars](https://img.shields.io/github/stars/dayicorp/auction-mcp?style=flat&label=★)
-
-> 最后巡检：2026-11-02 · 离线测试 105/105 通过
 
 司法拍卖实时查询 MCP server — **阿里拍卖 + 京东拍卖** 双端聚合, 纯 Python httpx, 零外部设备/桥.
 
@@ -28,7 +26,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
   含 4 个直辖市的区县; 全量数据集往返零误解析
 - **反爬守门** — 阿里 server 不认编码时会静默返全国乱掺垃圾, 工具自动校验拒绝
 - **常驻自愈** — `_m_h5_tk` cookie 过期自动重 bootstrap; baxia 风控 HTML 返结构化错误不崩
-- **121 个 pytest 测试** — 102 项零网络 (单元/容错/协议层冒烟/全链路冒烟) + 19 项真打线上
+- **124 个 pytest 测试** — 105 项零网络 (单元/容错/协议层冒烟/全链路冒烟) + 19 项真打线上
 
 ## Quick start
 
@@ -48,7 +46,7 @@ search_judicial(province="广东", city="深圳市", district="福田区")
 ```bash
 pip install -r requirements.txt        # 运行期: mcp (<2), httpx
 pip install -r requirements-dev.txt    # + pytest, 跑测试才需要
-pytest                                 # 102 项零网络: 单元 + 容错 + 冒烟 (协议层/全链路)
+pytest                                 # 105 项零网络: 单元 + 容错 + 冒烟 (协议层/全链路)
 pytest --run-live                      # + 19 项集成 (真打 Ali/JD API)
 ```
 
